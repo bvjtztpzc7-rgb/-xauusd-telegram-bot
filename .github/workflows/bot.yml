@@ -1,4 +1,4 @@
-name: XAUUSD Paper Bot
+name: Bot cartaceo XAUUSD
 
 on:
   schedule:
@@ -21,7 +21,7 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Installa librerie
+      - name: Installa dipendenze
         run: pip install -r requirements.txt
 
       - name: Avvia bot paper/demo
