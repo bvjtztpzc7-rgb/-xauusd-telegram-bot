@@ -869,7 +869,7 @@ def esegui_backtest(df, strategia):
 
             tp = (
                 entry +
-                (2.0 * atr)
+                (2.5 * atr)
             )
 
         # ====================================================
@@ -885,7 +885,7 @@ def esegui_backtest(df, strategia):
 
             tp = (
                 entry -
-                (2.0 * atr)
+                (2.5 * atr)
             )
 
         # ====================================================
