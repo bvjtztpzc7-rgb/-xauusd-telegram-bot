@@ -920,17 +920,13 @@ def esegui_backtest(df, strategia):
 
     print("=" * 60)
 
-    return operazioni
-
-
 # ============================================================
-# METRICHE
+# CALCOLO METRICHE
 # ============================================================
 
 def calcola_metriche(operazioni):
 
     if not operazioni:
-
         return {
             "operazioni": 0,
             "tp": 0,
@@ -951,13 +947,12 @@ def calcola_metriche(operazioni):
             "sell_sl": 0
         }
 
-    risultati = [
-        op["risultato"]
-        for op in operazioni
-    ]
+    # ========================================================
+    # RISULTATI
+    # ========================================================
 
-    profitti = [
-        op["profitto"]
+    risultati = [
+        op.get("risultato")
         for op in operazioni
     ]
 
@@ -968,9 +963,34 @@ def calcola_metriche(operazioni):
 
     win_rate = (
         tp / totale * 100
+        if totale > 0
+        else 0
     )
 
-    risultato = sum(profitti)
+    # ========================================================
+    # PROFITTI
+    # ========================================================
+
+    profitti = []
+
+    for op in operazioni:
+
+        profitto = op.get("profitto", 0)
+
+        # Se per qualsiasi motivo il valore non è numerico,
+        # non lo usiamo come profitto.
+        try:
+            profitto = float(profitto)
+        except (TypeError, ValueError):
+            profitto = 0.0
+
+        profitti.append(profitto)
+
+    risultato_totale = sum(profitti)
+
+    # ========================================================
+    # VINCITE / PERDITE
+    # ========================================================
 
     vincite = [
         x for x in profitti
@@ -1026,10 +1046,7 @@ def calcola_metriche(operazioni):
         if equity > massimo:
             massimo = equity
 
-        drawdown = (
-            massimo -
-            equity
-        )
+        drawdown = massimo - equity
 
         if drawdown > max_drawdown:
             max_drawdown = drawdown
@@ -1044,14 +1061,14 @@ def calcola_metriche(operazioni):
     win_streak = 0
     loss_streak = 0
 
-    for risultato in risultati:
+    for risultato_operazione in risultati:
 
-        if risultato == "TP":
+        if risultato_operazione == "TP":
 
             win_streak += 1
             loss_streak = 0
 
-        else:
+        elif risultato_operazione == "SL":
 
             loss_streak += 1
             win_streak = 0
@@ -1072,44 +1089,52 @@ def calcola_metriche(operazioni):
 
     buy_ops = [
         op for op in operazioni
-        if op["tipo"] == "BUY"
+        if op.get("tipo") == "BUY"
     ]
 
     sell_ops = [
         op for op in operazioni
-        if op["tipo"] == "SELL"
+        if op.get("tipo") == "SELL"
     ]
 
     buy_tp = sum(
-        op["risultato"] == "TP"
+        1
         for op in buy_ops
+        if op.get("risultato") == "TP"
     )
 
     buy_sl = sum(
-        op["risultato"] == "SL"
+        1
         for op in buy_ops
+        if op.get("risultato") == "SL"
     )
 
     sell_tp = sum(
-        op["risultato"] == "TP"
+        1
         for op in sell_ops
+        if op.get("risultato") == "TP"
     )
 
     sell_sl = sum(
-        op["risultato"] == "SL"
+        1
         for op in sell_ops
+        if op.get("risultato") == "SL"
     )
+
+    # ========================================================
+    # RISULTATO FINALE
+    # ========================================================
 
     return {
         "operazioni": totale,
         "tp": tp,
         "sl": sl,
-        "win_rate": win_rate,
-        "risultato": risultato,
-        "profit_factor": profit_factor,
-        "media_vincita": media_vincita,
-        "media_perdita": media_perdita,
-        "drawdown": max_drawdown,
+        "win_rate": float(win_rate),
+        "risultato": float(risultato_totale),
+        "profit_factor": float(profit_factor),
+        "media_vincita": float(media_vincita),
+        "media_perdita": float(media_perdita),
+        "drawdown": float(max_drawdown),
         "max_win_streak": max_win_streak,
         "max_loss_streak": max_loss_streak,
         "buy": len(buy_ops),
@@ -1125,148 +1150,99 @@ def calcola_metriche(operazioni):
 # STAMPA METRICHE
 # ============================================================
 
-def stampa_metriche(
-
-    nome,
-
-    descrizione,
-
-    metriche
-
-):
+def stampa_metriche(nome, descrizione, metriche):
 
     print()
-
     print("=" * 65)
-
     print("📌", nome)
-
     print(descrizione)
-
     print("-" * 65)
 
     print(
-
         f"Operazioni: {metriche['operazioni']}"
-
     )
 
     print(
-
         f"TP: {metriche['tp']}"
-
     )
 
     print(
-
         f"SL: {metriche['sl']}"
-
     )
 
     print(
-
         f"Win rate: {float(metriche['win_rate']):.2f}%"
-
     )
 
     print(
-
         f"Risultato prezzo: "
-
         f"{float(metriche['risultato']):.2f}"
-
     )
 
     print(
-
         f"Profit Factor: "
-
         f"{float(metriche['profit_factor']):.2f}"
-
     )
 
     print(
-
         f"Media vincita: "
-
         f"{float(metriche['media_vincita']):.2f}"
-
     )
 
     print(
-
         f"Media perdita: "
-
         f"{float(metriche['media_perdita']):.2f}"
-
     )
 
     print(
-
         f"Drawdown massimo: "
-
         f"{float(metriche['drawdown']):.2f}"
-
     )
 
     print(
-
         f"Max serie vittorie: "
-
         f"{metriche['max_win_streak']}"
-
     )
 
     print(
-
         f"Max serie perdite: "
-
         f"{metriche['max_loss_streak']}"
-
     )
 
     print()
-
     print("📈 BUY")
 
     print(
-
-        f"Operazioni: {metriche['buy']}"
-
+        f"Operazioni: "
+        f"{metriche['buy']}"
     )
 
     print(
-
-        f"TP: {metriche['buy_tp']}"
-
+        f"TP: "
+        f"{metriche['buy_tp']}"
     )
 
     print(
-
-        f"SL: {metriche['buy_sl']}"
-
+        f"SL: "
+        f"{metriche['buy_sl']}"
     )
 
     print()
-
     print("📉 SELL")
 
     print(
-
-        f"Operazioni: {metriche['sell']}"
-
+        f"Operazioni: "
+        f"{metriche['sell']}"
     )
 
     print(
-
-        f"TP: {metriche['sell_tp']}"
-
+        f"TP: "
+        f"{metriche['sell_tp']}"
     )
 
     print(
-
-        f"SL: {metriche['sell_sl']}"
-
+        f"SL: "
+        f"{metriche['sell_sl']}"
     )
 
 
