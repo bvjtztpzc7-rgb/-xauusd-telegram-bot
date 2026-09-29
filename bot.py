@@ -1,7 +1,7 @@
 import os
 import requests
 import pandas as pd
-import numpy as np
+
 
 # ============================================================
 # CONFIGURAZIONE
@@ -71,6 +71,8 @@ def scarica_dati():
         timeout=20
     )
 
+    risposta.raise_for_status()
+
     dati = risposta.json()
 
     if "values" not in dati:
@@ -83,7 +85,8 @@ def scarica_dati():
     df = pd.DataFrame(dati["values"])
 
     df["datetime"] = pd.to_datetime(
-        df["datetime"]
+        df["datetime"],
+        utc=True
     )
 
     for col in [
@@ -94,11 +97,13 @@ def scarica_dati():
     ]:
 
         df[col] = pd.to_numeric(
-            df[col]
+            df[col],
+            errors="coerce"
         )
 
     df = (
         df
+        .dropna()
         .sort_values("datetime")
         .reset_index(drop=True)
     )
@@ -134,7 +139,7 @@ def calcola_indicatori(df):
         .mean()
     )
 
-    # MACD 12 / 26 / 9
+    # MACD
 
     ema12 = (
         df["close"]
@@ -169,13 +174,9 @@ def calcola_indicatori(df):
 
     delta = df["close"].diff()
 
-    gain = delta.clip(
-        lower=0
-    )
+    gain = delta.clip(lower=0)
 
-    loss = -delta.clip(
-        upper=0
-    )
+    loss = -delta.clip(upper=0)
 
     avg_gain = (
         gain
@@ -249,8 +250,6 @@ def calcola_indicatori(df):
 
 def calcola_trend_15m(df):
 
-    df = df.copy()
-
     df_15m = (
         df
         .set_index("datetime")
@@ -283,39 +282,25 @@ def calcola_trend_15m(df):
         .mean()
     )
 
-    if len(df_15m) < 2:
+    if len(df_15m) < 3:
         return "NEUTRAL", None
 
-    # Ultima candela 15m chiusa
+    ultima = df_15m.iloc[-2]
 
-    ultima_15m = df_15m.iloc[-2]
-
-    if (
-        ultima_15m["EMA20_15"] >
-        ultima_15m["EMA50_15"]
-    ):
-
+    if ultima["EMA20_15"] > ultima["EMA50_15"]:
         trend = "BULLISH"
 
-    elif (
-        ultima_15m["EMA20_15"] <
-        ultima_15m["EMA50_15"]
-    ):
-
+    elif ultima["EMA20_15"] < ultima["EMA50_15"]:
         trend = "BEARISH"
 
     else:
-
         trend = "NEUTRAL"
 
-    return (
-        trend,
-        ultima_15m["datetime"]
-    )
+    return trend, ultima["datetime"]
 
 
 # ============================================================
-# ANALISI XAU/USD
+# ANALISI
 # ============================================================
 
 def analizza_xauusd():
@@ -327,42 +312,39 @@ def analizza_xauusd():
 
     if len(df) < 100:
 
-        print("❌ Dati insufficienti.")
+        print("❌ Dati insufficienti")
 
         return None
 
     df = calcola_indicatori(df)
 
-    # Ultima candela 5m completamente chiusa
-
+    # Ultima candela completamente chiusa
     candela = df.iloc[-2]
 
-    trend_15m, datetime_15m = (
+    trend_15m, trend_datetime = (
         calcola_trend_15m(df)
     )
 
     prezzo = candela["close"]
-
+    ema20 = candela["EMA20"]
+    ema50 = candela["EMA50"]
+    macd = candela["MACD"]
+    macd_signal = candela["MACD_signal"]
     rsi = candela["RSI"]
-
     atr = candela["ATR"]
 
-    ema20 = candela["EMA20"]
-
-    ema50 = candela["EMA50"]
-
-    macd = candela["MACD"]
-
-    macd_signal = candela["MACD_signal"]
-
-    # ========================================================
-    # CONDIZIONI
-    # ========================================================
+    # --------------------------------------------------------
+    # CONDIZIONI BUY
+    # --------------------------------------------------------
 
     buy_ema = ema20 > ema50
     buy_macd = macd > macd_signal
     buy_rsi = 30 < rsi < 65
     buy_trend = trend_15m == "BULLISH"
+
+    # --------------------------------------------------------
+    # CONDIZIONI SELL
+    # --------------------------------------------------------
 
     sell_ema = ema20 < ema50
     sell_macd = macd < macd_signal
@@ -370,10 +352,6 @@ def analizza_xauusd():
     sell_trend = trend_15m == "BEARISH"
 
     segnale = "NONE"
-
-    # ========================================================
-    # BUY
-    # ========================================================
 
     if (
         buy_ema
@@ -384,10 +362,6 @@ def analizza_xauusd():
 
         segnale = "BUY"
 
-    # ========================================================
-    # SELL
-    # ========================================================
-
     elif (
         sell_ema
         and sell_macd
@@ -397,134 +371,103 @@ def analizza_xauusd():
 
         segnale = "SELL"
 
-    # ========================================================
+    # --------------------------------------------------------
     # SL / TP
-    # ========================================================
+    # --------------------------------------------------------
 
     sl = None
     tp = None
 
     if segnale == "BUY":
 
-        sl = (
-            prezzo -
-            (1.5 * atr)
-        )
-
-        tp = (
-            prezzo +
-            (2.0 * atr)
-        )
+        sl = prezzo - (1.5 * atr)
+        tp = prezzo + (2.0 * atr)
 
     elif segnale == "SELL":
 
-        sl = (
-            prezzo +
-            (1.5 * atr)
-        )
+        sl = prezzo + (1.5 * atr)
+        tp = prezzo - (2.0 * atr)
 
-        tp = (
-            prezzo -
-            (2.0 * atr)
-        )
-
-    # ========================================================
+    # --------------------------------------------------------
     # DIAGNOSTICA
-    # ========================================================
+    # --------------------------------------------------------
 
     print("")
     print("========================================")
-    print("📊 ANALISI COMPLETA")
+    print("📊 ANALISI XAU/USD")
     print("========================================")
 
+    print(f"⏰ Candela: {candela['datetime']}")
     print(f"💰 Prezzo: {prezzo:.2f}")
+
+    print("")
     print(f"EMA20: {ema20:.4f}")
     print(f"EMA50: {ema50:.4f}")
     print(f"MACD: {macd:.4f}")
     print(f"MACD Signal: {macd_signal:.4f}")
     print(f"RSI: {rsi:.2f}")
     print(f"ATR: {atr:.4f}")
-    print(f"Trend 15m: {trend_15m}")
 
     print("")
-    print("🟢 CONDIZIONI BUY")
-
-    print(
-        f"EMA20 > EMA50: "
-        f"{'✅' if buy_ema else '❌'}"
-    )
-
-    print(
-        f"MACD > Signal: "
-        f"{'✅' if buy_macd else '❌'}"
-    )
-
-    print(
-        f"RSI tra 30 e 65: "
-        f"{'✅' if buy_rsi else '❌'}"
-    )
-
-    print(
-        f"Trend 15m BULLISH: "
-        f"{'✅' if buy_trend else '❌'}"
-    )
+    print(f"📈 Trend 15m: {trend_15m}")
+    print(f"🕐 Ultimo trend 15m chiuso: {trend_datetime}")
 
     print("")
-    print("🔴 CONDIZIONI SELL")
+    print("🟢 BUY")
 
     print(
-        f"EMA20 < EMA50: "
-        f"{'✅' if sell_ema else '❌'}"
+        f"EMA: {'✅' if buy_ema else '❌'}"
     )
 
     print(
-        f"MACD < Signal: "
-        f"{'✅' if sell_macd else '❌'}"
+        f"MACD: {'✅' if buy_macd else '❌'}"
     )
 
     print(
-        f"RSI tra 30 e 65: "
-        f"{'✅' if sell_rsi else '❌'}"
+        f"RSI: {'✅' if buy_rsi else '❌'}"
     )
 
     print(
-        f"Trend 15m BEARISH: "
-        f"{'✅' if sell_trend else '❌'}"
+        f"Trend: {'✅' if buy_trend else '❌'}"
     )
 
     print("")
-    print(f"➡️ RISULTATO: {segnale}")
+    print("🔴 SELL")
+
+    print(
+        f"EMA: {'✅' if sell_ema else '❌'}"
+    )
+
+    print(
+        f"MACD: {'✅' if sell_macd else '❌'}"
+    )
+
+    print(
+        f"RSI: {'✅' if sell_rsi else '❌'}"
+    )
+
+    print(
+        f"Trend: {'✅' if sell_trend else '❌'}"
+    )
+
+    print("")
+    print(f"➡️ SEGNALE: {segnale}")
     print("========================================")
-    print("")
 
     return {
-
         "signal": segnale,
-
         "datetime": candela["datetime"],
-
         "price": prezzo,
-
         "sl": sl,
-
         "tp": tp,
-
         "rsi": rsi,
-
         "atr": atr,
-
         "macd": macd,
-
         "macd_signal": macd_signal,
-
         "ema20": ema20,
-
         "ema50": ema50,
-
         "trend_15m": trend_15m,
-
-        "trend_datetime": datetime_15m
-
+        "trend_datetime": trend_datetime
     }
 
 
@@ -534,49 +477,24 @@ def analizza_xauusd():
 
 def crea_messaggio(r):
 
-    if r["signal"] == "BUY":
-
-        emoji = "🟢"
-
-    else:
-
-        emoji = "🔴"
+    emoji = "🟢" if r["signal"] == "BUY" else "🔴"
 
     return (
-
-        f"🧪 PAPER/DEMO\n\n"
-
-        f"{emoji} XAU/USD — "
-        f"{r['signal']}\n\n"
-
-        f"⏰ Candela: "
-        f"{r['datetime']}\n"
-
-        f"💰 Entry: "
-        f"{r['price']:.2f}\n"
-
-        f"🛑 SL: "
-        f"{r['sl']:.2f}\n"
-
-        f"🎯 TP: "
-        f"{r['tp']:.2f}\n\n"
-
-        f"RSI: "
-        f"{r['rsi']:.2f}\n"
-
-        f"ATR: "
-        f"{r['atr']:.2f}\n"
-
-        f"Trend 15m: "
-        f"{r['trend_15m']}\n\n"
-
-        f"⚠️ Segnale simulato — "
-        f"nessun ordine reale."
+        "🧪 PAPER/DEMO\n\n"
+        f"{emoji} XAU/USD — {r['signal']}\n\n"
+        f"⏰ Candela: {r['datetime']}\n"
+        f"💰 Entry: {r['price']:.2f}\n"
+        f"🛑 SL: {r['sl']:.2f}\n"
+        f"🎯 TP: {r['tp']:.2f}\n\n"
+        f"RSI: {r['rsi']:.2f}\n"
+        f"ATR: {r['atr']:.2f}\n"
+        f"Trend 15m: {r['trend_15m']}\n\n"
+        "⚠️ Segnale simulato — nessun ordine reale."
     )
 
 
 # ============================================================
-# ESECUZIONE SINGOLA
+# ESECUZIONE
 # ============================================================
 
 print("========================================")
@@ -585,75 +503,33 @@ print("========================================")
 
 try:
 
-    df = scarica_dati()
-
-    if df is None or len(df) < 100:
-
-        print("⚠️ Dati insufficienti.")
-
-        raise SystemExit(0)
-
-    candela = df.iloc[-2]["datetime"]
-
-    print(
-        f"🕐 Candela chiusa: {candela}"
-    )
-
-    print(
-        "🔎 Analisi XAU/USD..."
-    )
-
     risultato = analizza_xauusd()
 
     if risultato is None:
 
-        print(
-            "⚠️ Analisi non disponibile."
-        )
+        print("⚠️ Analisi non disponibile")
 
         raise SystemExit(0)
 
     segnale = risultato["signal"]
 
-    print(
-        f"📊 Segnale: {segnale}"
-    )
-
     if segnale in ["BUY", "SELL"]:
 
-        messaggio = (
-            crea_messaggio(risultato)
-        )
+        print("📨 Segnale trovato")
 
-        print(
-            "📨 Invio segnale "
-            "PAPER/DEMO a Telegram..."
-        )
+        messaggio = crea_messaggio(risultato)
 
-        if invia_telegram(messaggio):
-
-            print(
-                "✅ Segnale inviato."
-            )
+        invia_telegram(messaggio)
 
     else:
 
-        print(
-            "⏳ Nessun segnale."
-        )
+        print("⏳ Nessun nuovo segnale")
 
-    print(
-        "========================================"
-    )
-
-    print(
-        "✅ Esecuzione terminata."
-    )
+    print("")
+    print("✅ Esecuzione terminata")
 
 except Exception as e:
 
     print("❌ ERRORE:")
-
     print(e)
-
     raise
