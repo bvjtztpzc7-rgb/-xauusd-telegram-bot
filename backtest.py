@@ -1,3 +1,454 @@
+import os
+import requests
+import pandas as pd
+import numpy as np
+
+
+# ============================================================
+# CONFIGURAZIONE
+# ============================================================
+
+API_KEY = os.getenv("TWELVE_DATA_API_KEY")
+
+if not API_KEY:
+    raise RuntimeError(
+        "TWELVE_DATA_API_KEY non configurata"
+    )
+
+
+# ============================================================
+# SCARICA DATI
+# ============================================================
+
+def scarica_dati():
+
+    url = "https://api.twelvedata.com/time_series"
+
+    def richiesta(params):
+
+        response = requests.get(
+            url,
+            params=params,
+            timeout=30
+        )
+
+        data = response.json()
+
+        if data.get("status") == "error":
+            raise RuntimeError(
+                f"Errore Twelve Data: {data}"
+            )
+
+        if "values" not in data:
+            raise RuntimeError(
+                f"Risposta Twelve Data inattesa: {data}"
+            )
+
+        return data["values"]
+
+    # ========================================================
+    # BLOCCO 1
+    # ========================================================
+
+    params1 = {
+        "symbol": "XAU/USD",
+        "interval": "5min",
+        "outputsize": 5000,
+        "apikey": API_KEY,
+        "format": "JSON",
+        "timezone": "UTC",
+        "order": "desc"
+    }
+
+    valori1 = richiesta(params1)
+
+    df1 = pd.DataFrame(valori1)
+
+    df1["datetime"] = pd.to_datetime(
+        df1["datetime"],
+        utc=True
+    )
+
+    df1 = df1[
+        [
+            "datetime",
+            "open",
+            "high",
+            "low",
+            "close"
+        ]
+    ].copy()
+
+    for col in [
+        "open",
+        "high",
+        "low",
+        "close"
+    ]:
+        df1[col] = pd.to_numeric(
+            df1[col],
+            errors="coerce"
+        )
+
+    df1 = df1.dropna()
+
+    data_piu_vecchia = df1["datetime"].min()
+
+    # ========================================================
+    # BLOCCO 2
+    # ========================================================
+
+    data_fine_secondo_blocco = (
+        data_piu_vecchia -
+        pd.Timedelta(minutes=5)
+    )
+
+    params2 = {
+        "symbol": "XAU/USD",
+        "interval": "5min",
+        "outputsize": 5000,
+        "apikey": API_KEY,
+        "format": "JSON",
+        "timezone": "UTC",
+        "end_date": data_fine_secondo_blocco.strftime(
+            "%Y-%m-%dT%H:%M:%S"
+        ),
+        "order": "desc"
+    }
+
+    valori2 = richiesta(params2)
+
+    df2 = pd.DataFrame(valori2)
+
+    df2["datetime"] = pd.to_datetime(
+        df2["datetime"],
+        utc=True
+    )
+
+    df2 = df2[
+        [
+            "datetime",
+            "open",
+            "high",
+            "low",
+            "close"
+        ]
+    ].copy()
+
+    for col in [
+        "open",
+        "high",
+        "low",
+        "close"
+    ]:
+        df2[col] = pd.to_numeric(
+            df2[col],
+            errors="coerce"
+        )
+
+    df2 = df2.dropna()
+
+    # ========================================================
+    # UNIONE
+    # ========================================================
+
+    df = pd.concat(
+        [df1, df2],
+        ignore_index=True
+    )
+
+    df = df.drop_duplicates(
+        subset=["datetime"]
+    )
+
+    df = df.sort_values(
+        "datetime"
+    ).reset_index(drop=True)
+
+    print(
+        f"Candele scaricate: {len(df)}"
+    )
+
+    print(
+        f"Da: {df['datetime'].iloc[0]}"
+    )
+
+    print(
+        f"A: {df['datetime'].iloc[-1]}"
+    )
+
+    return df
+
+
+# ============================================================
+# INDICATORI
+# ============================================================
+
+def calcola_indicatori(df):
+
+    df = df.copy()
+
+    # EMA 20
+    df["ema20"] = df["close"].ewm(
+        span=20,
+        adjust=False
+    ).mean()
+
+    # EMA 50
+    df["ema50"] = df["close"].ewm(
+        span=50,
+        adjust=False
+    ).mean()
+
+    # MACD
+    ema12 = df["close"].ewm(
+        span=12,
+        adjust=False
+    ).mean()
+
+    ema26 = df["close"].ewm(
+        span=26,
+        adjust=False
+    ).mean()
+
+    df["macd"] = ema12 - ema26
+
+    df["macd_signal"] = df["macd"].ewm(
+        span=9,
+        adjust=False
+    ).mean()
+
+    # RSI
+    delta = df["close"].diff()
+
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+
+    avg_gain = gain.rolling(14).mean()
+    avg_loss = loss.rolling(14).mean()
+
+    rs = avg_gain / avg_loss
+
+    df["rsi"] = 100 - (
+        100 / (1 + rs)
+    )
+
+    # ATR
+    high_low = (
+        df["high"] -
+        df["low"]
+    )
+
+    high_close = (
+        df["high"] -
+        df["close"].shift()
+    ).abs()
+
+    low_close = (
+        df["low"] -
+        df["close"].shift()
+    ).abs()
+
+    true_range = pd.concat(
+        [
+            high_low,
+            high_close,
+            low_close
+        ],
+        axis=1
+    ).max(axis=1)
+
+    df["atr"] = true_range.rolling(14).mean()
+
+    # MACD precedente
+    df["macd_prev"] = df["macd"].shift(1)
+
+    df["signal_prev"] = (
+        df["macd_signal"].shift(1)
+    )
+
+    return df
+
+
+# ============================================================
+# TENDENZA 15 MINUTI
+# ============================================================
+
+def aggiungi_trend_15m(df):
+
+    temp = df.set_index("datetime")
+
+    df15 = temp.resample("15min").agg({
+        "open": "first",
+        "high": "max",
+        "low": "min",
+        "close": "last"
+    }).dropna()
+
+    df15["ema20"] = df15["close"].ewm(
+        span=20,
+        adjust=False
+    ).mean()
+
+    df15["ema50"] = df15["close"].ewm(
+        span=50,
+        adjust=False
+    ).mean()
+
+    df15["trend"] = np.where(
+        df15["ema20"] > df15["ema50"],
+        "BULLISH",
+        "BEARISH"
+    )
+
+    result = df.copy()
+
+    result["trend_15m"] = None
+
+    for i in range(len(result)):
+
+        timestamp = result.loc[
+            i,
+            "datetime"
+        ]
+
+        periodo = timestamp.floor("15min")
+
+        periodi_precedenti = df15.index[
+            df15.index < periodo
+        ]
+
+        if len(periodi_precedenti) == 0:
+            continue
+
+        ultimo_periodo = (
+            periodi_precedenti[-1]
+        )
+
+        result.loc[
+            i,
+            "trend_15m"
+        ] = df15.loc[
+            ultimo_periodo,
+            "trend"
+        ]
+
+    return result
+
+
+# ============================================================
+# GENERAZIONE SEGNALE
+# ============================================================
+
+def genera_segnale(row, strategia):
+
+    if pd.isna(row["atr"]):
+        return None
+
+    trend = row["trend_15m"]
+
+    # ========================================================
+    # STRATEGIA A
+    # ========================================================
+
+    if strategia == "A":
+
+        buy = (
+            row["ema20"] > row["ema50"]
+            and
+            row["macd"] > row["macd_signal"]
+            and
+            30 < row["rsi"] < 65
+            and
+            trend == "BULLISH"
+        )
+
+        sell = (
+            row["ema20"] < row["ema50"]
+            and
+            row["macd"] < row["macd_signal"]
+            and
+            30 < row["rsi"] < 65
+            and
+            trend == "BEARISH"
+        )
+
+    # ========================================================
+    # STRATEGIA B
+    # ========================================================
+
+    elif strategia == "B":
+
+        buy = (
+            row["ema20"] > row["ema50"]
+            and
+            row["macd"] > row["macd_signal"]
+            and
+            30 < row["rsi"] < 70
+            and
+            trend == "BULLISH"
+        )
+
+        sell = (
+            row["ema20"] < row["ema50"]
+            and
+            row["macd"] < row["macd_signal"]
+            and
+            30 < row["rsi"] < 70
+            and
+            trend == "BEARISH"
+        )
+
+    # ========================================================
+    # STRATEGIA C
+    # ========================================================
+
+    elif strategia == "C":
+
+        bullish_cross = (
+            row["macd_prev"] <= row["signal_prev"]
+            and
+            row["macd"] > row["macd_signal"]
+        )
+
+        bearish_cross = (
+            row["macd_prev"] >= row["signal_prev"]
+            and
+            row["macd"] < row["macd_signal"]
+        )
+
+        buy = (
+            row["ema20"] > row["ema50"]
+            and
+            bullish_cross
+            and
+            30 < row["rsi"] < 70
+            and
+            trend == "BULLISH"
+        )
+
+        sell = (
+            row["ema20"] < row["ema50"]
+            and
+            bearish_cross
+            and
+            30 < row["rsi"] < 70
+            and
+            trend == "BEARISH"
+        )
+
+    else:
+        return None
+
+    if buy:
+        return "BUY"
+
+    if sell:
+        return "SELL"
+
+    return None
+
+
 # ============================================================
 # BACKTEST
 # ============================================================
@@ -5,11 +456,12 @@
 def esegui_backtest(df, strategia):
 
     operazioni = []
+
     posizione = None
 
-    # --------------------------------------------------------
-    # CONTATORI DIAGNOSTICI
-    # --------------------------------------------------------
+    # ========================================================
+    # DIAGNOSTICA BUY
+    # ========================================================
 
     buy = {
         "ema": 0,
@@ -21,6 +473,10 @@ def esegui_backtest(df, strategia):
         "finale": 0
     }
 
+    # ========================================================
+    # DIAGNOSTICA SELL
+    # ========================================================
+
     sell = {
         "ema": 0,
         "macd": 0,
@@ -31,7 +487,10 @@ def esegui_backtest(df, strategia):
         "finale": 0
     }
 
-    for i in range(1, len(df) - 1):
+    for i in range(
+        1,
+        len(df) - 1
+    ):
 
         row = df.iloc[i]
 
@@ -54,29 +513,42 @@ def esegui_backtest(df, strategia):
             if posizione["tipo"] == "BUY":
 
                 if low <= sl:
+
                     risultato = "SL"
                     exit_price = sl
 
                 elif high >= tp:
+
                     risultato = "TP"
                     exit_price = tp
 
             else:
 
                 if high >= sl:
+
                     risultato = "SL"
                     exit_price = sl
 
                 elif low <= tp:
+
                     risultato = "TP"
                     exit_price = tp
 
             if risultato is not None:
 
                 if posizione["tipo"] == "BUY":
-                    profitto = exit_price - entry
+
+                    profitto = (
+                        exit_price -
+                        entry
+                    )
+
                 else:
-                    profitto = entry - exit_price
+
+                    profitto = (
+                        entry -
+                        exit_price
+                    )
 
                 operazioni.append({
                     "tipo": posizione["tipo"],
@@ -90,7 +562,7 @@ def esegui_backtest(df, strategia):
             continue
 
         # ----------------------------------------------------
-        # DATI BASE
+        # DATI NON VALIDI
         # ----------------------------------------------------
 
         if pd.isna(row["atr"]):
@@ -98,149 +570,140 @@ def esegui_backtest(df, strategia):
 
         trend = row["trend_15m"]
 
-        ema_bull = row["ema20"] > row["ema50"]
-        ema_bear = row["ema20"] < row["ema50"]
+        ema_bull = (
+            row["ema20"] >
+            row["ema50"]
+        )
 
-        macd_bull = row["macd"] > row["macd_signal"]
-        macd_bear = row["macd"] < row["macd_signal"]
+        ema_bear = (
+            row["ema20"] <
+            row["ema50"]
+        )
+
+        macd_bull = (
+            row["macd"] >
+            row["macd_signal"]
+        )
+
+        macd_bear = (
+            row["macd"] <
+            row["macd_signal"]
+        )
 
         # ----------------------------------------------------
-        # STRATEGIE A / B
+        # DIAGNOSTICA
         # ----------------------------------------------------
 
         if strategia == "A":
 
-            rsi_ok = 30 < row["rsi"] < 65
-
-            if ema_bull:
-                buy["ema"] += 1
-
-            if macd_bull:
-                buy["macd"] += 1
-
-            if rsi_ok:
-                buy["rsi"] += 1
-
-            if trend == "BULLISH":
-                buy["trend"] += 1
-
-            if ema_bull and macd_bull:
-                buy["ema_macd"] += 1
-
-            if ema_bull and macd_bull and rsi_ok:
-                buy["ema_macd_rsi"] += 1
-
-            if (
-                ema_bull
-                and macd_bull
-                and rsi_ok
-                and trend == "BULLISH"
-            ):
-                buy["finale"] += 1
-
-            # SELL
-
-            if ema_bear:
-                sell["ema"] += 1
-
-            if macd_bear:
-                sell["macd"] += 1
-
-            if trend == "BEARISH":
-                sell["trend"] += 1
-
-            if ema_bear and macd_bear:
-                sell["ema_macd"] += 1
-
-            if ema_bear and macd_bear and rsi_ok:
-                sell["ema_macd_rsi"] += 1
-
-            if (
-                ema_bear
-                and macd_bear
-                and rsi_ok
-                and trend == "BEARISH"
-            ):
-                sell["finale"] += 1
-
-        # ----------------------------------------------------
-        # STRATEGIA B
-        # ----------------------------------------------------
+            rsi_ok = (
+                30 <
+                row["rsi"] <
+                65
+            )
 
         elif strategia == "B":
 
-            rsi_ok = 30 < row["rsi"] < 70
+            rsi_ok = (
+                30 <
+                row["rsi"] <
+                70
+            )
 
-            if ema_bull:
-                buy["ema"] += 1
+        else:
 
-            if macd_bull:
-                buy["macd"] += 1
+            rsi_ok = (
+                30 <
+                row["rsi"] <
+                70
+            )
 
-            if rsi_ok:
-                buy["rsi"] += 1
+        # ====================================================
+        # BUY DIAGNOSTICA
+        # ====================================================
 
-            if trend == "BULLISH":
-                buy["trend"] += 1
+        if ema_bull:
+            buy["ema"] += 1
 
-            if ema_bull and macd_bull:
-                buy["ema_macd"] += 1
+        if macd_bull:
+            buy["macd"] += 1
 
-            if ema_bull and macd_bull and rsi_ok:
-                buy["ema_macd_rsi"] += 1
+        if rsi_ok:
+            buy["rsi"] += 1
 
-            if (
-                ema_bull
-                and macd_bull
-                and rsi_ok
-                and trend == "BULLISH"
-            ):
-                buy["finale"] += 1
+        if trend == "BULLISH":
+            buy["trend"] += 1
 
-            # SELL
+        if (
+            ema_bull
+            and
+            macd_bull
+        ):
+            buy["ema_macd"] += 1
 
-            if ema_bear:
-                sell["ema"] += 1
+        if (
+            ema_bull
+            and
+            macd_bull
+            and
+            rsi_ok
+        ):
+            buy["ema_macd_rsi"] += 1
 
-            if macd_bear:
-                sell["macd"] += 1
+        # ====================================================
+        # SELL DIAGNOSTICA
+        # ====================================================
 
-            if trend == "BEARISH":
-                sell["trend"] += 1
+        if ema_bear:
+            sell["ema"] += 1
 
-            if ema_bear and macd_bear:
-                sell["ema_macd"] += 1
+        if macd_bear:
+            sell["macd"] += 1
 
-            if ema_bear and macd_bear and rsi_ok:
-                sell["ema_macd_rsi"] += 1
+        if trend == "BEARISH":
+            sell["trend"] += 1
 
-            if (
-                ema_bear
-                and macd_bear
-                and rsi_ok
-                and trend == "BEARISH"
-            ):
-                sell["finale"] += 1
+        if (
+            ema_bear
+            and
+            macd_bear
+        ):
+            sell["ema_macd"] += 1
 
-        # ----------------------------------------------------
+        if (
+            ema_bear
+            and
+            macd_bear
+            and
+            rsi_ok
+        ):
+            sell["ema_macd_rsi"] += 1
+
+        # ====================================================
         # STRATEGIA C
-        # ----------------------------------------------------
+        # ====================================================
 
-        elif strategia == "C":
+        if strategia == "C":
 
             bullish_cross = (
-                row["macd_prev"] <= row["signal_prev"]
+                row["macd_prev"]
+                <=
+                row["signal_prev"]
                 and
-                row["macd"] > row["macd_signal"]
+                row["macd"]
+                >
+                row["macd_signal"]
             )
 
             bearish_cross = (
-                row["macd_prev"] >= row["signal_prev"]
+                row["macd_prev"]
+                >=
+                row["signal_prev"]
                 and
-                row["macd"] < row["macd_signal"]
+                row["macd"]
+                <
+                row["macd_signal"]
             )
-
-            rsi_ok = 30 < row["rsi"] < 70
 
             if (
                 ema_bull
@@ -265,7 +728,60 @@ def esegui_backtest(df, strategia):
                 sell["finale"] += 1
 
         else:
-            continue
+
+            # =================================================
+            # BUY FINALE A/B
+            # =================================================
+
+            if strategia == "A":
+
+                buy_finale = (
+                    ema_bull
+                    and
+                    macd_bull
+                    and
+                    30 < row["rsi"] < 65
+                    and
+                    trend == "BULLISH"
+                )
+
+                sell_finale = (
+                    ema_bear
+                    and
+                    macd_bear
+                    and
+                    30 < row["rsi"] < 65
+                    and
+                    trend == "BEARISH"
+                )
+
+            else:
+
+                buy_finale = (
+                    ema_bull
+                    and
+                    macd_bull
+                    and
+                    30 < row["rsi"] < 70
+                    and
+                    trend == "BULLISH"
+                )
+
+                sell_finale = (
+                    ema_bear
+                    and
+                    macd_bear
+                    and
+                    30 < row["rsi"] < 70
+                    and
+                    trend == "BEARISH"
+                )
+
+            if buy_finale:
+                buy["finale"] += 1
+
+            if sell_finale:
+                sell["finale"] += 1
 
         # ----------------------------------------------------
         # SEGNALE REALE
@@ -279,55 +795,593 @@ def esegui_backtest(df, strategia):
         if segnale is None:
             continue
 
-        entry = df.iloc[i + 1]["open"]
+        entry = df.iloc[
+            i + 1
+        ]["open"]
+
         atr = row["atr"]
 
         if segnale == "BUY":
 
-            sl = entry - (1.5 * atr)
-            tp = entry + (2.0 * atr)
+            sl = (
+                entry -
+                (1.5 * atr)
+            )
+
+            tp = (
+                entry +
+                (2.0 * atr)
+            )
 
         else:
 
-            sl = entry + (1.5 * atr)
-            tp = entry - (2.0 * atr)
+            sl = (
+                entry +
+                (1.5 * atr)
+            )
+
+            tp = (
+                entry -
+                (2.0 * atr)
+            )
 
         posizione = {
             "tipo": segnale,
             "entry": entry,
             "sl": sl,
             "tp": tp,
-            "datetime": df.iloc[i + 1]["datetime"]
+            "datetime": df.iloc[
+                i + 1
+            ]["datetime"]
         }
 
-    # --------------------------------------------------------
-    # DIAGNOSTICA
-    # --------------------------------------------------------
+    # ========================================================
+    # STAMPA DIAGNOSTICA
+    # ========================================================
 
     print()
-    print("🔎 DIAGNOSTICA — STRATEGIA", strategia)
+    print(
+        "🔎 DIAGNOSTICA — STRATEGIA",
+        strategia
+    )
     print("=" * 60)
 
     print("BUY")
     print("-" * 60)
-    print("EMA:", buy["ema"])
-    print("MACD:", buy["macd"])
-    print("RSI:", buy["rsi"])
-    print("TREND BULLISH:", buy["trend"])
-    print("EMA + MACD:", buy["ema_macd"])
-    print("EMA + MACD + RSI:", buy["ema_macd_rsi"])
-    print("SEGNALE BUY FINALE:", buy["finale"])
+
+    print(
+        "EMA20 > EMA50:",
+        buy["ema"]
+    )
+
+    print(
+        "MACD > SIGNAL:",
+        buy["macd"]
+    )
+
+    print(
+        "RSI OK:",
+        buy["rsi"]
+    )
+
+    print(
+        "TREND BULLISH:",
+        buy["trend"]
+    )
+
+    print(
+        "EMA + MACD:",
+        buy["ema_macd"]
+    )
+
+    print(
+        "EMA + MACD + RSI:",
+        buy["ema_macd_rsi"]
+    )
+
+    print(
+        "SEGNALE BUY FINALE:",
+        buy["finale"]
+    )
 
     print()
     print("SELL")
     print("-" * 60)
-    print("EMA:", sell["ema"])
-    print("MACD:", sell["macd"])
-    print("TREND BEARISH:", sell["trend"])
-    print("EMA + MACD:", sell["ema_macd"])
-    print("EMA + MACD + RSI:", sell["ema_macd_rsi"])
-    print("SEGNALE SELL FINALE:", sell["finale"])
+
+    print(
+        "EMA20 < EMA50:",
+        sell["ema"]
+    )
+
+    print(
+        "MACD < SIGNAL:",
+        sell["macd"]
+    )
+
+    print(
+        "TREND BEARISH:",
+        sell["trend"]
+    )
+
+    print(
+        "EMA + MACD:",
+        sell["ema_macd"]
+    )
+
+    print(
+        "EMA + MACD + RSI:",
+        sell["ema_macd_rsi"]
+    )
+
+    print(
+        "SEGNALE SELL FINALE:",
+        sell["finale"]
+    )
 
     print("=" * 60)
 
     return operazioni
+
+
+# ============================================================
+# METRICHE
+# ============================================================
+
+def calcola_metriche(operazioni):
+
+    if not operazioni:
+
+        return {
+            "operazioni": 0,
+            "tp": 0,
+            "sl": 0,
+            "win_rate": 0,
+            "risultato": 0,
+            "profit_factor": 0,
+            "media_vincita": 0,
+            "media_perdita": 0,
+            "drawdown": 0,
+            "max_win_streak": 0,
+            "max_loss_streak": 0,
+            "buy": 0,
+            "buy_tp": 0,
+            "buy_sl": 0,
+            "sell": 0,
+            "sell_tp": 0,
+            "sell_sl": 0
+        }
+
+    risultati = [
+        op["risultato"]
+        for op in operazioni
+    ]
+
+    profitti = [
+        op["profitto"]
+        for op in operazioni
+    ]
+
+    tp = risultati.count("TP")
+    sl = risultati.count("SL")
+
+    totale = len(operazioni)
+
+    win_rate = (
+        tp / totale * 100
+    )
+
+    risultato = sum(profitti)
+
+    vincite = [
+        x for x in profitti
+        if x > 0
+    ]
+
+    perdite = [
+        x for x in profitti
+        if x < 0
+    ]
+
+    totale_vincite = sum(vincite)
+
+    totale_perdite = abs(
+        sum(perdite)
+    )
+
+    if totale_perdite > 0:
+
+        profit_factor = (
+            totale_vincite /
+            totale_perdite
+        )
+
+    else:
+
+        profit_factor = 0
+
+    media_vincita = (
+        np.mean(vincite)
+        if vincite
+        else 0
+    )
+
+    media_perdita = (
+        np.mean(perdite)
+        if perdite
+        else 0
+    )
+
+    # ========================================================
+    # DRAWDOWN
+    # ========================================================
+
+    equity = 0
+    massimo = 0
+    max_drawdown = 0
+
+    for profitto in profitti:
+
+        equity += profitto
+
+        if equity > massimo:
+            massimo = equity
+
+        drawdown = (
+            massimo -
+            equity
+        )
+
+        if drawdown > max_drawdown:
+            max_drawdown = drawdown
+
+    # ========================================================
+    # STREAK
+    # ========================================================
+
+    max_win_streak = 0
+    max_loss_streak = 0
+
+    win_streak = 0
+    loss_streak = 0
+
+    for risultato in risultati:
+
+        if risultato == "TP":
+
+            win_streak += 1
+            loss_streak = 0
+
+        else:
+
+            loss_streak += 1
+            win_streak = 0
+
+        max_win_streak = max(
+            max_win_streak,
+            win_streak
+        )
+
+        max_loss_streak = max(
+            max_loss_streak,
+            loss_streak
+        )
+
+    # ========================================================
+    # BUY / SELL
+    # ========================================================
+
+    buy_ops = [
+        op for op in operazioni
+        if op["tipo"] == "BUY"
+    ]
+
+    sell_ops = [
+        op for op in operazioni
+        if op["tipo"] == "SELL"
+    ]
+
+    buy_tp = sum(
+        op["risultato"] == "TP"
+        for op in buy_ops
+    )
+
+    buy_sl = sum(
+        op["risultato"] == "SL"
+        for op in buy_ops
+    )
+
+    sell_tp = sum(
+        op["risultato"] == "TP"
+        for op in sell_ops
+    )
+
+    sell_sl = sum(
+        op["risultato"] == "SL"
+        for op in sell_ops
+    )
+
+    return {
+        "operazioni": totale,
+        "tp": tp,
+        "sl": sl,
+        "win_rate": win_rate,
+        "risultato": risultato,
+        "profit_factor": profit_factor,
+        "media_vincita": media_vincita,
+        "media_perdita": media_perdita,
+        "drawdown": max_drawdown,
+        "max_win_streak": max_win_streak,
+        "max_loss_streak": max_loss_streak,
+        "buy": len(buy_ops),
+        "buy_tp": buy_tp,
+        "buy_sl": buy_sl,
+        "sell": len(sell_ops),
+        "sell_tp": sell_tp,
+        "sell_sl": sell_sl
+    }
+
+
+# ============================================================
+# STAMPA METRICHE
+# ============================================================
+
+def stampa_metriche(
+    nome,
+    descrizione,
+    metriche
+):
+
+    print()
+    print("=" * 65)
+    print("📌", nome)
+    print(descrizione)
+    print("-" * 65)
+
+    print(
+        f"Operazioni: {metriche['operazioni']}"
+    )
+
+    print(
+        f"TP: {metriche['tp']}"
+    )
+
+    print(
+        f"SL: {metriche['sl']}"
+    )
+
+    print(
+        f"Win rate: {metriche['win_rate']:.2f}%"
+    )
+
+    print(
+        f"Risultato prezzo: "
+        f"{metriche['risultato']:.2f}"
+    )
+
+    print(
+        f"Profit Factor: "
+        f"{metriche['profit_factor']:.2f}"
+    )
+
+    print(
+        f"Media vincita: "
+        f"{metriche['media_vincita']:.2f}"
+    )
+
+    print(
+        f"Media perdita: "
+        f"{metriche['media_perdita']:.2f}"
+    )
+
+    print(
+        f"Drawdown massimo: "
+        f"{metriche['drawdown']:.2f}"
+    )
+
+    print(
+        f"Max serie vittorie: "
+        f"{metriche['max_win_streak']}"
+    )
+
+    print(
+        f"Max serie perdite: "
+        f"{metriche['max_loss_streak']}"
+    )
+
+    print()
+
+    print("📈 BUY")
+
+    print(
+        f"Operazioni: "
+        f"{metriche['buy']}"
+    )
+
+    print(
+        f"TP: "
+        f"{metriche['buy_tp']}"
+    )
+
+    print(
+        f"SL: "
+        f"{metriche['buy_sl']}"
+    )
+
+    print()
+
+    print("📉 SELL")
+
+    print(
+        f"Operazioni: "
+        f"{metriche['sell']}"
+    )
+
+    print(
+        f"TP: "
+        f"{metriche['sell_tp']}"
+    )
+
+    print(
+        f"SL: "
+        f"{metriche['sell_sl']}"
+    )
+
+
+# ============================================================
+# ESECUZIONE
+# ============================================================
+
+def esegui_fase(
+    df,
+    nome_fase,
+    percentuale
+):
+
+    print()
+    print("#" * 65)
+    print(
+        f"📊 {nome_fase}"
+    )
+    print("#" * 65)
+
+    print(
+        f"Candele: {len(df)}"
+    )
+
+    print(
+        f"Da: {df['datetime'].iloc[0]}"
+    )
+
+    print(
+        f"A: {df['datetime'].iloc[-1]}"
+    )
+
+    strategie = [
+        (
+            "A",
+            "Strategia attuale — RSI 30-65"
+        ),
+        (
+            "B",
+            "RSI ampliato — RSI 30-70"
+        ),
+        (
+            "C",
+            "Incrocio MACD — RSI 30-70"
+        )
+    ]
+
+    for strategia, descrizione in strategie:
+
+        operazioni = esegui_backtest(
+            df,
+            strategia
+        )
+
+        metriche = calcola_metriche(
+            operazioni
+        )
+
+        stampa_metriche(
+            f"STRATEGIA {strategia}",
+            descrizione,
+            metriche
+        )
+
+
+# ============================================================
+# MAIN
+# ============================================================
+
+def main():
+
+    print()
+    print("XAU/USD — BACKTEST PAPER/DEMO")
+    print(
+        "📊 TEST SVILUPPO 70% / VERIFICA 30%"
+    )
+    print("=" * 65)
+
+    # --------------------------------------------------------
+    # SCARICA
+    # --------------------------------------------------------
+
+    df = scarica_dati()
+
+    print()
+    print(
+        f"📊 Candele totali scaricate: "
+        f"{len(df)}"
+    )
+
+    print(
+        f"📅 Periodo completo: "
+        f"{df['datetime'].iloc[0]}"
+        f" → "
+        f"{df['datetime'].iloc[-1]}"
+    )
+
+    # --------------------------------------------------------
+    # INDICATORI
+    # --------------------------------------------------------
+
+    df = calcola_indicatori(df)
+
+    # --------------------------------------------------------
+    # TREND 15M
+    # --------------------------------------------------------
+
+    df = aggiungi_trend_15m(df)
+
+    # --------------------------------------------------------
+    # SPLIT 70 / 30
+    # --------------------------------------------------------
+
+    split_index = int(
+        len(df) * 0.70
+    )
+
+    df_sviluppo = df.iloc[
+        :split_index
+    ].copy()
+
+    df_verifica = df.iloc[
+        split_index:
+    ].copy()
+
+    # --------------------------------------------------------
+    # FASE 1
+    # --------------------------------------------------------
+
+    esegui_fase(
+        df_sviluppo,
+        "FASE 1 — SVILUPPO 70%",
+        70
+    )
+
+    # --------------------------------------------------------
+    # FASE 2
+    # --------------------------------------------------------
+
+    esegui_fase(
+        df_verifica,
+        "FASE 2 — VERIFICA 30%",
+        30
+    )
+
+    # --------------------------------------------------------
+    # FINE
+    # --------------------------------------------------------
+
+    print()
+    print("=" * 65)
+    print("✅ BACKTEST TERMINATO")
+    print("=" * 65)
+
+
+# ============================================================
+# AVVIO PROGRAMMA
+# ============================================================
+
+if __name__ == "__main__":
+    main()
