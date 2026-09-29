@@ -65,7 +65,6 @@ def scarica_dati():
 
 def calcola_indicatori(df):
 
-    # EMA
     df["ema20"] = df["close"].ewm(
         span=20,
         adjust=False
@@ -76,7 +75,6 @@ def calcola_indicatori(df):
         adjust=False
     ).mean()
 
-    # MACD
     ema12 = df["close"].ewm(
         span=12,
         adjust=False
@@ -94,7 +92,6 @@ def calcola_indicatori(df):
         adjust=False
     ).mean()
 
-    # RSI
     delta = df["close"].diff()
 
     gain = delta.clip(lower=0)
@@ -109,7 +106,6 @@ def calcola_indicatori(df):
         100 / (1 + rs)
     )
 
-    # ATR
     high_low = df["high"] - df["low"]
 
     high_close = (
@@ -133,7 +129,6 @@ def calcola_indicatori(df):
 
     df["atr"] = true_range.rolling(14).mean()
 
-    # MACD precedente
     df["macd_prev"] = df["macd"].shift(1)
     df["signal_prev"] = df["macd_signal"].shift(1)
 
@@ -171,11 +166,6 @@ def aggiungi_trend_15m(df):
         "BEARISH"
     )
 
-    # Usiamo solamente candele 15m CHIUSE.
-    # La candela 15m in corso non viene utilizzata.
-
-    df15["trend_closed"] = df15["trend"].shift(1)
-
     result = df.copy()
 
     result["trend_15m"] = None
@@ -210,10 +200,7 @@ def aggiungi_trend_15m(df):
 # GENERAZIONE SEGNALE
 # ============================================================
 
-def genera_segnale(
-    riga,
-    strategia
-):
+def genera_segnale(riga, strategia):
 
     if pd.isna(riga["atr"]):
         return None
@@ -222,7 +209,6 @@ def genera_segnale(
 
     # --------------------------------------------------------
     # STRATEGIA A
-    # Strategia attuale
     # --------------------------------------------------------
 
     if strategia == "A":
@@ -249,7 +235,6 @@ def genera_segnale(
 
     # --------------------------------------------------------
     # STRATEGIA B
-    # RSI 30-70
     # --------------------------------------------------------
 
     elif strategia == "B":
@@ -276,25 +261,20 @@ def genera_segnale(
 
     # --------------------------------------------------------
     # STRATEGIA C
-    # Incrocio MACD
     # --------------------------------------------------------
 
     elif strategia == "C":
 
         bullish_cross = (
-            riga["macd_prev"] <=
-            riga["signal_prev"]
+            riga["macd_prev"] <= riga["signal_prev"]
             and
-            riga["macd"] >
-            riga["macd_signal"]
+            riga["macd"] > riga["macd_signal"]
         )
 
         bearish_cross = (
-            riga["macd_prev"] >=
-            riga["signal_prev"]
+            riga["macd_prev"] >= riga["signal_prev"]
             and
-            riga["macd"] <
-            riga["macd_signal"]
+            riga["macd"] < riga["macd_signal"]
         )
 
         buy = (
@@ -333,13 +313,9 @@ def genera_segnale(
 # BACKTEST
 # ============================================================
 
-def esegui_backtest(
-    df,
-    strategia
-):
+def esegui_backtest(df, strategia):
 
     operazioni = []
-
     posizione = None
 
     for i in range(1, len(df) - 1):
@@ -347,7 +323,7 @@ def esegui_backtest(
         riga = df.iloc[i]
 
         # ----------------------------------------------------
-        # GESTIONE POSIZIONE
+        # POSIZIONE APERTA
         # ----------------------------------------------------
 
         if posizione is not None:
@@ -401,7 +377,7 @@ def esegui_backtest(
             continue
 
         # ----------------------------------------------------
-        # CERCA NUOVO SEGNALE
+        # NUOVO SEGNALE
         # ----------------------------------------------------
 
         segnale = genera_segnale(
@@ -412,7 +388,6 @@ def esegui_backtest(
         if segnale is None:
             continue
 
-        # Entriamo all'apertura della candela successiva
         entry = df.iloc[i + 1]["open"]
 
         atr = riga["atr"]
@@ -449,32 +424,49 @@ def esegui_backtest(
 
 
 # ============================================================
-# RISULTATI
+# METRICHE
 # ============================================================
 
-def risultati(operazioni):
+def calcola_metriche(operazioni):
 
-    totale = len(operazioni)
-
-    if totale == 0:
+    if not operazioni:
 
         return {
-            "operazioni": 0,
+            "totale": 0,
             "tp": 0,
             "sl": 0,
             "winrate": 0,
-            "profitto": 0
+            "profitto": 0,
+            "profit_factor": 0,
+            "media_win": 0,
+            "media_loss": 0,
+            "drawdown": 0,
+            "max_win_streak": 0,
+            "max_loss_streak": 0,
+            "buy": 0,
+            "buy_tp": 0,
+            "buy_sl": 0,
+            "sell": 0,
+            "sell_tp": 0,
+            "sell_sl": 0
         }
 
-    tp = sum(
-        x["risultato"] == "TP"
-        for x in operazioni
-    )
+    totale = len(operazioni)
 
-    sl = sum(
-        x["risultato"] == "SL"
+    vincenti = [
+        x["profitto"]
         for x in operazioni
-    )
+        if x["risultato"] == "TP"
+    ]
+
+    perdenti = [
+        x["profitto"]
+        for x in operazioni
+        if x["risultato"] == "SL"
+    ]
+
+    tp = len(vincenti)
+    sl = len(perdenti)
 
     winrate = (
         tp / totale
@@ -485,13 +477,239 @@ def risultati(operazioni):
         for x in operazioni
     )
 
+    profitto_lordo = sum(vincenti)
+
+    perdita_lorda = abs(
+        sum(perdenti)
+    )
+
+    if perdita_lorda > 0:
+        profit_factor = (
+            profitto_lordo /
+            perdita_lorda
+        )
+    else:
+        profit_factor = float("inf")
+
+    media_win = (
+        np.mean(vincenti)
+        if vincenti
+        else 0
+    )
+
+    media_loss = (
+        np.mean(perdenti)
+        if perdenti
+        else 0
+    )
+
+    # --------------------------------------------------------
+    # EQUITY CURVE E DRAWDOWN
+    # --------------------------------------------------------
+
+    capitale = 0
+    massimo = 0
+    max_drawdown = 0
+
+    for op in operazioni:
+
+        capitale += op["profitto"]
+
+        if capitale > massimo:
+            massimo = capitale
+
+        drawdown = massimo - capitale
+
+        if drawdown > max_drawdown:
+            max_drawdown = drawdown
+
+    # --------------------------------------------------------
+    # STREAK
+    # --------------------------------------------------------
+
+    max_win_streak = 0
+    max_loss_streak = 0
+
+    win_streak = 0
+    loss_streak = 0
+
+    for op in operazioni:
+
+        if op["risultato"] == "TP":
+
+            win_streak += 1
+            loss_streak = 0
+
+        else:
+
+            loss_streak += 1
+            win_streak = 0
+
+        max_win_streak = max(
+            max_win_streak,
+            win_streak
+        )
+
+        max_loss_streak = max(
+            max_loss_streak,
+            loss_streak
+        )
+
+    # --------------------------------------------------------
+    # BUY / SELL
+    # --------------------------------------------------------
+
+    buy_ops = [
+        x for x in operazioni
+        if x["tipo"] == "BUY"
+    ]
+
+    sell_ops = [
+        x for x in operazioni
+        if x["tipo"] == "SELL"
+    ]
+
+    buy_tp = sum(
+        x["risultato"] == "TP"
+        for x in buy_ops
+    )
+
+    buy_sl = sum(
+        x["risultato"] == "SL"
+        for x in buy_ops
+    )
+
+    sell_tp = sum(
+        x["risultato"] == "TP"
+        for x in sell_ops
+    )
+
+    sell_sl = sum(
+        x["risultato"] == "SL"
+        for x in sell_ops
+    )
+
     return {
-        "operazioni": totale,
+        "totale": totale,
         "tp": tp,
         "sl": sl,
         "winrate": winrate,
-        "profitto": profitto
+        "profitto": profitto,
+        "profit_factor": profit_factor,
+        "media_win": media_win,
+        "media_loss": media_loss,
+        "drawdown": max_drawdown,
+        "max_win_streak": max_win_streak,
+        "max_loss_streak": max_loss_streak,
+        "buy": len(buy_ops),
+        "buy_tp": buy_tp,
+        "buy_sl": buy_sl,
+        "sell": len(sell_ops),
+        "sell_tp": sell_tp,
+        "sell_sl": sell_sl
     }
+
+
+# ============================================================
+# STAMPA RISULTATI
+# ============================================================
+
+def stampa_risultati(codice, nome, metriche):
+
+    print()
+    print("=" * 65)
+
+    print(f"📌 STRATEGIA {codice}")
+    print(nome)
+
+    print("-" * 65)
+
+    print(
+        f"Operazioni: {metriche['totale']}"
+    )
+
+    print(
+        f"TP: {metriche['tp']}"
+    )
+
+    print(
+        f"SL: {metriche['sl']}"
+    )
+
+    print(
+        f"Win rate: {metriche['winrate']:.2f}%"
+    )
+
+    print(
+        f"Risultato prezzo: "
+        f"{metriche['profitto']:.2f}"
+    )
+
+    print(
+        f"Profit Factor: "
+        f"{metriche['profit_factor']:.2f}"
+    )
+
+    print(
+        f"Media vincita: "
+        f"{metriche['media_win']:.2f}"
+    )
+
+    print(
+        f"Media perdita: "
+        f"{metriche['media_loss']:.2f}"
+    )
+
+    print(
+        f"Drawdown massimo: "
+        f"{metriche['drawdown']:.2f}"
+    )
+
+    print(
+        f"Max serie vittorie: "
+        f"{metriche['max_win_streak']}"
+    )
+
+    print(
+        f"Max serie perdite: "
+        f"{metriche['max_loss_streak']}"
+    )
+
+    print()
+    print("📈 BUY")
+
+    print(
+        f"Operazioni: "
+        f"{metriche['buy']}"
+    )
+
+    print(
+        f"TP: "
+        f"{metriche['buy_tp']}"
+    )
+
+    print(
+        f"SL: "
+        f"{metriche['buy_sl']}"
+    )
+
+    print()
+    print("📉 SELL")
+
+    print(
+        f"Operazioni: "
+        f"{metriche['sell']}"
+    )
+
+    print(
+        f"TP: "
+        f"{metriche['sell_tp']}"
+    )
+
+    print(
+        f"SL: "
+        f"{metriche['sell_sl']}"
+    )
 
 
 # ============================================================
@@ -500,13 +718,14 @@ def risultati(operazioni):
 
 print()
 print("=" * 65)
-print("🤖 CONFRONTO STRATEGIE XAU/USD — PAPER/DEMO")
+print("🤖 ANALISI STRATEGIE XAU/USD — PAPER/DEMO")
 print("=" * 65)
 
 df = scarica_dati()
 
+print()
 print(
-    f"\n📊 Candele analizzate: {len(df)}"
+    f"📊 Candele analizzate: {len(df)}"
 )
 
 print(
@@ -514,15 +733,12 @@ print(
 )
 
 print(
-    f"📅 A:  {df.iloc[-1]['datetime']}"
+    f"📅 A: {df.iloc[-1]['datetime']}"
 )
 
 df = calcola_indicatori(df)
 
 df = aggiungi_trend_15m(df)
-
-print()
-print("=" * 65)
 
 strategie = {
     "A": "Strategia attuale — RSI 30-65",
@@ -537,39 +753,23 @@ for codice, nome in strategie.items():
         codice
     )
 
-    r = risultati(operazioni)
-
-    print()
-    print(f"📌 STRATEGIA {codice}")
-    print(nome)
-    print("-" * 65)
-
-    print(
-        f"Operazioni: {r['operazioni']}"
+    metriche = calcola_metriche(
+        operazioni
     )
 
-    print(
-        f"TP: {r['tp']}"
-    )
-
-    print(
-        f"SL: {r['sl']}"
-    )
-
-    print(
-        f"Win rate: {r['winrate']:.2f}%"
-    )
-
-    print(
-        f"Risultato prezzo: {r['profitto']:.2f}"
+    stampa_risultati(
+        codice,
+        nome,
+        metriche
     )
 
 print()
 print("=" * 65)
-print("✅ CONFRONTO TERMINATO")
+print("✅ ANALISI TERMINATA")
 print("=" * 65)
+
 print()
 print(
-    "⚠️ I risultati sono simulazioni storiche "
-    "e non garantiscono risultati futuri."
+    "⚠️ Simulazione storica: "
+    "i risultati passati non garantiscono risultati futuri."
 )
