@@ -336,118 +336,174 @@ def aggiungi_trend_15m(df):
     return result
 
 
-# ============================================================
-# GENERAZIONE SEGNALE
-# ============================================================
-
 def genera_segnale(row, strategia):
+
+    # ========================================================
+    # DATI NECESSARI
+    # ========================================================
 
     if pd.isna(row["atr"]):
         return None
 
-    trend = row["trend_15m"]
+    ema_bull = (
+        row["ema20"] >
+        row["ema50"]
+    )
+
+    ema_bear = (
+        row["ema20"] <
+        row["ema50"]
+    )
+
+    macd_bull = (
+        row["macd"] >
+        row["macd_signal"]
+    )
+
+    macd_bear = (
+        row["macd"] <
+        row["macd_signal"]
+    )
+
+    trend_bull = (
+        row["trend_15m"] == "BULLISH"
+    )
+
+    trend_bear = (
+        row["trend_15m"] == "BEARISH"
+    )
 
     # ========================================================
     # STRATEGIA A
+    # RSI 30-65
     # ========================================================
 
     if strategia == "A":
 
-        buy = (
-            row["ema20"] > row["ema50"]
-            and
-            row["macd"] > row["macd_signal"]
-            and
-            30 < row["rsi"] < 65
-            and
-            trend == "BULLISH"
+        rsi_ok = (
+            30 <
+            row["rsi"] <
+            65
         )
 
-        sell = (
-            row["ema20"] < row["ema50"]
-            and
-            row["macd"] < row["macd_signal"]
-            and
-            30 < row["rsi"] < 65
-            and
-            trend == "BEARISH"
-        )
+        if (
+            ema_bull
+            and macd_bull
+            and rsi_ok
+            and trend_bull
+        ):
+            return "BUY"
+
+        if (
+            ema_bear
+            and macd_bear
+            and rsi_ok
+            and trend_bear
+        ):
+            return "SELL"
+
+        return None
 
     # ========================================================
     # STRATEGIA B
+    # RSI 30-70
     # ========================================================
 
-    elif strategia == "B":
+    if strategia == "B":
 
-        buy = (
-            row["ema20"] > row["ema50"]
-            and
-            row["macd"] > row["macd_signal"]
-            and
-            30 < row["rsi"] < 70
-            and
-            trend == "BULLISH"
+        rsi_ok = (
+            30 <
+            row["rsi"] <
+            70
         )
 
-        sell = (
-            row["ema20"] < row["ema50"]
-            and
-            row["macd"] < row["macd_signal"]
-            and
-            30 < row["rsi"] < 70
-            and
-            trend == "BEARISH"
-        )
+        if (
+            ema_bull
+            and macd_bull
+            and rsi_ok
+            and trend_bull
+        ):
+            return "BUY"
+
+        if (
+            ema_bear
+            and macd_bear
+            and rsi_ok
+            and trend_bear
+        ):
+            return "SELL"
+
+        return None
 
     # ========================================================
     # STRATEGIA C
+    # INCROCIO MACD
     # ========================================================
 
-    elif strategia == "C":
+    if strategia == "C":
+
+        if (
+            pd.isna(row["macd_prev"])
+            or
+            pd.isna(row["signal_prev"])
+        ):
+            return None
+
+        rsi_ok = (
+            30 <
+            row["rsi"] <
+            70
+        )
 
         bullish_cross = (
-            row["macd_prev"] <= row["signal_prev"]
+            row["macd_prev"]
+            <=
+            row["signal_prev"]
             and
-            row["macd"] > row["macd_signal"]
+            row["macd"]
+            >
+            row["macd_signal"]
         )
 
         bearish_cross = (
-            row["macd_prev"] >= row["signal_prev"]
+            row["macd_prev"]
+            >=
+            row["signal_prev"]
             and
-            row["macd"] < row["macd_signal"]
+            row["macd"]
+            <
+            row["macd_signal"]
         )
 
-        buy = (
-            row["ema20"] > row["ema50"]
+        if (
+            ema_bull
             and
             bullish_cross
             and
-            30 < row["rsi"] < 70
+            rsi_ok
             and
-            trend == "BULLISH"
-        )
+            trend_bull
+        ):
+            return "BUY"
 
-        sell = (
-            row["ema20"] < row["ema50"]
+        if (
+            ema_bear
             and
             bearish_cross
             and
-            30 < row["rsi"] < 70
+            rsi_ok
             and
-            trend == "BEARISH"
-        )
+            trend_bear
+        ):
+            return "SELL"
 
-    else:
         return None
 
-    if buy:
-        return "BUY"
-
-    if sell:
-        return "SELL"
+    # ========================================================
+    # STRATEGIA NON RICONOSCIUTA
+    # ========================================================
 
     return None
-
 
 # ============================================================
 # BACKTEST
