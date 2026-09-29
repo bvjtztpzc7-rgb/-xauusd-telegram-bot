@@ -529,6 +529,17 @@ try:
         raise SystemExit(0)
 
     segnale = risultato["signal"]
+    print("========================================")
+print("📊 INDICATORI")
+print(f"Close: {risultato['price']:.5f}")
+print(f"EMA20: {risultato['ema20']:.5f}")
+print(f"EMA50: {risultato['ema50']:.5f}")
+print(f"MACD: {risultato['macd']:.5f}")
+print(f"MACD Signal: {risultato['macd_signal']:.5f}")
+print(f"RSI: {risultato['rsi']:.2f}")
+print(f"ATR: {risultato['atr']:.5f}")
+print(f"Trend 15m: {risultato['trend_15m']}")
+print("========================================")
 
     print(
         f"📊 Segnale: {segnale}"
