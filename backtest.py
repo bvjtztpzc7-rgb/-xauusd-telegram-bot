@@ -24,7 +24,7 @@ def scarica_dati():
     params = {
         "symbol": "XAU/USD",
         "interval": "5min",
-        "outputsize": 10000,
+        "outputsize": 5000,
         "apikey": API_KEY,
         "format": "JSON"
     }
