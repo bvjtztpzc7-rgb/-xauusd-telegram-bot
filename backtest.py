@@ -396,6 +396,7 @@ def genera_segnale(row, strategia):
 
 
 # ============================================================
+# # ============================================================
 # BACKTEST
 # ============================================================
 
@@ -404,6 +405,20 @@ def esegui_backtest(df, strategia):
     operazioni = []
 
     posizione = None
+
+    # ========================================================
+    # CONTATORI DIAGNOSTICI
+    # ========================================================
+
+    conteggi = {
+        "EMA": 0,
+        "MACD": 0,
+        "RSI": 0,
+        "TREND": 0,
+        "EMA_MACD": 0,
+        "EMA_MACD_RSI": 0,
+        "EMA_MACD_RSI_TREND": 0
+    }
 
     for i in range(1, len(df) - 1):
 
@@ -427,8 +442,6 @@ def esegui_backtest(df, strategia):
 
             if posizione["tipo"] == "BUY":
 
-                # Se nella stessa candela vengono toccati
-                # entrambi, consideriamo prima lo SL
                 if low <= sl:
                     risultato = "SL"
                     exit_price = sl
@@ -466,7 +479,68 @@ def esegui_backtest(df, strategia):
             continue
 
         # ----------------------------------------------------
-        # CERCA SEGNALE
+        # CONDIZIONI DIAGNOSTICHE
+        # ----------------------------------------------------
+
+        if pd.isna(row["atr"]):
+            continue
+
+        trend = row["trend_15m"]
+
+        ema_bull = row["ema20"] > row["ema50"]
+        ema_bear = row["ema20"] < row["ema50"]
+
+        macd_bull = row["macd"] > row["macd_signal"]
+        macd_bear = row["macd"] < row["macd_signal"]
+
+        if strategia == "A":
+            rsi_ok = 30 < row["rsi"] < 65
+
+        elif strategia == "B":
+            rsi_ok = 30 < row["rsi"] < 70
+
+        elif strategia == "C":
+            continue
+
+        else:
+            continue
+
+        # ----------------------------------------------------
+        # CONTROLLIAMO LE CONDIZIONI BUY
+        # ----------------------------------------------------
+
+        if ema_bull:
+            conteggi["EMA"] += 1
+
+        if macd_bull:
+            conteggi["MACD"] += 1
+
+        if rsi_ok:
+            conteggi["RSI"] += 1
+
+        if trend == "BULLISH":
+            conteggi["TREND"] += 1
+
+        if ema_bull and macd_bull:
+            conteggi["EMA_MACD"] += 1
+
+        if (
+            ema_bull
+            and macd_bull
+            and rsi_ok
+        ):
+            conteggi["EMA_MACD_RSI"] += 1
+
+        if (
+            ema_bull
+            and macd_bull
+            and rsi_ok
+            and trend == "BULLISH"
+        ):
+            conteggi["EMA_MACD_RSI_TREND"] += 1
+
+        # ----------------------------------------------------
+        # SEGNALE
         # ----------------------------------------------------
 
         segnale = genera_segnale(
@@ -509,8 +583,26 @@ def esegui_backtest(df, strategia):
             "datetime": df.iloc[i + 1]["datetime"]
         }
 
-    return operazioni
+    # ========================================================
+    # STAMPA DIAGNOSTICA
+    # ========================================================
 
+    print()
+    print("🔎 DIAGNOSTICA BUY — STRATEGIA", strategia)
+    print("-" * 50)
+    print("EMA20 > EMA50:", conteggi["EMA"])
+    print("MACD > SIGNAL:", conteggi["MACD"])
+    print("RSI OK:", conteggi["RSI"])
+    print("TREND BULLISH:", conteggi["TREND"])
+    print("EMA + MACD:", conteggi["EMA_MACD"])
+    print("EMA + MACD + RSI:", conteggi["EMA_MACD_RSI"])
+    print(
+        "EMA + MACD + RSI + TREND:",
+        conteggi["EMA_MACD_RSI_TREND"]
+    )
+    print("-" * 50)
+
+    return operazioni
 
 # ============================================================
 # METRICHE
