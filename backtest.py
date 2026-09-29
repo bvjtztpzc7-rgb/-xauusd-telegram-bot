@@ -543,10 +543,11 @@ def esegui_backtest(df, strategia):
         "finale": 0
     }
 
-    for i in range(
-        1,
-        len(df) - 1
-    ):
+    # ========================================================
+    # CICLO BACKTEST
+    # ========================================================
+
+    for i in range(1, len(df) - 1):
 
         row = df.iloc[i]
 
@@ -566,6 +567,10 @@ def esegui_backtest(df, strategia):
             risultato = None
             exit_price = None
 
+            # ------------------------------------------------
+            # BUY
+            # ------------------------------------------------
+
             if posizione["tipo"] == "BUY":
 
                 if low <= sl:
@@ -578,6 +583,10 @@ def esegui_backtest(df, strategia):
                     risultato = "TP"
                     exit_price = tp
 
+            # ------------------------------------------------
+            # SELL
+            # ------------------------------------------------
+
             else:
 
                 if high >= sl:
@@ -589,6 +598,10 @@ def esegui_backtest(df, strategia):
 
                     risultato = "TP"
                     exit_price = tp
+
+            # ------------------------------------------------
+            # CHIUSURA POSIZIONE
+            # ------------------------------------------------
 
             if risultato is not None:
 
@@ -609,7 +622,7 @@ def esegui_backtest(df, strategia):
                 operazioni.append({
                     "tipo": posizione["tipo"],
                     "risultato": risultato,
-                    "profitto": profitto,
+                    "profitto": float(profitto),
                     "datetime": posizione["datetime"]
                 })
 
@@ -623,6 +636,13 @@ def esegui_backtest(df, strategia):
 
         if pd.isna(row["atr"]):
             continue
+
+        if pd.isna(row["trend_15m"]):
+            continue
+
+        # ----------------------------------------------------
+        # CONDIZIONI INDICATORI
+        # ----------------------------------------------------
 
         trend = row["trend_15m"]
 
@@ -647,7 +667,7 @@ def esegui_backtest(df, strategia):
         )
 
         # ----------------------------------------------------
-        # DIAGNOSTICA
+        # RSI
         # ----------------------------------------------------
 
         if strategia == "A":
@@ -656,14 +676,6 @@ def esegui_backtest(df, strategia):
                 30 <
                 row["rsi"] <
                 65
-            )
-
-        elif strategia == "B":
-
-            rsi_ok = (
-                30 <
-                row["rsi"] <
-                70
             )
 
         else:
@@ -675,7 +687,7 @@ def esegui_backtest(df, strategia):
             )
 
         # ====================================================
-        # BUY DIAGNOSTICA
+        # DIAGNOSTICA BUY
         # ====================================================
 
         if ema_bull:
@@ -707,7 +719,7 @@ def esegui_backtest(df, strategia):
             buy["ema_macd_rsi"] += 1
 
         # ====================================================
-        # SELL DIAGNOSTICA
+        # DIAGNOSTICA SELL
         # ====================================================
 
         if ema_bear:
@@ -736,10 +748,17 @@ def esegui_backtest(df, strategia):
             sell["ema_macd_rsi"] += 1
 
         # ====================================================
-        # STRATEGIA C
+        # STRATEGIA C — INCROCIO MACD
         # ====================================================
 
         if strategia == "C":
+
+            if (
+                pd.isna(row["macd_prev"])
+                or
+                pd.isna(row["signal_prev"])
+            ):
+                continue
 
             bullish_cross = (
                 row["macd_prev"]
@@ -783,55 +802,31 @@ def esegui_backtest(df, strategia):
             ):
                 sell["finale"] += 1
 
+        # ====================================================
+        # STRATEGIE A / B
+        # ====================================================
+
         else:
 
-            # =================================================
-            # BUY FINALE A/B
-            # =================================================
+            buy_finale = (
+                ema_bull
+                and
+                macd_bull
+                and
+                rsi_ok
+                and
+                trend == "BULLISH"
+            )
 
-            if strategia == "A":
-
-                buy_finale = (
-                    ema_bull
-                    and
-                    macd_bull
-                    and
-                    30 < row["rsi"] < 65
-                    and
-                    trend == "BULLISH"
-                )
-
-                sell_finale = (
-                    ema_bear
-                    and
-                    macd_bear
-                    and
-                    30 < row["rsi"] < 65
-                    and
-                    trend == "BEARISH"
-                )
-
-            else:
-
-                buy_finale = (
-                    ema_bull
-                    and
-                    macd_bull
-                    and
-                    30 < row["rsi"] < 70
-                    and
-                    trend == "BULLISH"
-                )
-
-                sell_finale = (
-                    ema_bear
-                    and
-                    macd_bear
-                    and
-                    30 < row["rsi"] < 70
-                    and
-                    trend == "BEARISH"
-                )
+            sell_finale = (
+                ema_bear
+                and
+                macd_bear
+                and
+                rsi_ok
+                and
+                trend == "BEARISH"
+            )
 
             if buy_finale:
                 buy["finale"] += 1
@@ -839,9 +834,9 @@ def esegui_backtest(df, strategia):
             if sell_finale:
                 sell["finale"] += 1
 
-        # ----------------------------------------------------
+        # ====================================================
         # SEGNALE REALE
-        # ----------------------------------------------------
+        # ====================================================
 
         segnale = genera_segnale(
             row,
@@ -851,11 +846,19 @@ def esegui_backtest(df, strategia):
         if segnale is None:
             continue
 
+        # ----------------------------------------------------
+        # ENTRATA ALL'APERTURA DELLA CANDELA SUCCESSIVA
+        # ----------------------------------------------------
+
         entry = df.iloc[
             i + 1
         ]["open"]
 
-        atr = row["atr"]
+        atr = float(row["atr"])
+
+        # ====================================================
+        # BUY
+        # ====================================================
 
         if segnale == "BUY":
 
@@ -869,6 +872,10 @@ def esegui_backtest(df, strategia):
                 (2.0 * atr)
             )
 
+        # ====================================================
+        # SELL
+        # ====================================================
+
         else:
 
             sl = (
@@ -881,11 +888,15 @@ def esegui_backtest(df, strategia):
                 (2.0 * atr)
             )
 
+        # ====================================================
+        # APERTURA POSIZIONE
+        # ====================================================
+
         posizione = {
             "tipo": segnale,
-            "entry": entry,
-            "sl": sl,
-            "tp": tp,
+            "entry": float(entry),
+            "sl": float(sl),
+            "tp": float(tp),
             "datetime": df.iloc[
                 i + 1
             ]["datetime"]
@@ -975,6 +986,13 @@ def esegui_backtest(df, strategia):
     )
 
     print("=" * 60)
+
+    # ========================================================
+    # IMPORTANTE:
+    # RESTITUISCE LE OPERAZIONI AL CALCOLO METRICHE
+    # ========================================================
+
+    return operazioni
 
 # ============================================================
 # CALCOLO METRICHE
