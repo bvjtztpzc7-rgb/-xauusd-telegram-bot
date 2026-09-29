@@ -18,43 +18,130 @@ if not API_KEY:
 # ============================================================
 
 def scarica_dati():
-
     url = "https://api.twelvedata.com/time_series"
 
-    params = {
+    def richiesta(params):
+        response = requests.get(url, params=params, timeout=30)
+        data = response.json()
+
+        if "status" in data and data["status"] == "error":
+            raise RuntimeError(f"Errore Twelve Data: {data}")
+
+        if "values" not in data:
+            raise RuntimeError(f"Risposta Twelve Data inattesa: {data}")
+
+        return data["values"]
+
+    # ========================================================
+    # BLOCCO 1 — ultime 5000 candele
+    # ========================================================
+
+    params1 = {
         "symbol": "XAU/USD",
         "interval": "5min",
         "outputsize": 5000,
         "apikey": API_KEY,
-        "format": "JSON"
+        "format": "JSON",
+        "timezone": "UTC",
+        "order": "desc"
     }
 
-    response = requests.get(
-        url,
-        params=params,
-        timeout=30
-    )
+    valori1 = richiesta(params1)
 
-    data = response.json()
+    df1 = pd.DataFrame(valori1)
 
-    if "values" not in data:
-        raise RuntimeError(f"Errore Twelve Data: {data}")
-
-    df = pd.DataFrame(data["values"])
-
-    df["datetime"] = pd.to_datetime(
-        df["datetime"],
+    df1["datetime"] = pd.to_datetime(
+        df1["datetime"],
         utc=True
     )
 
+    df1 = df1[
+        ["datetime", "open", "high", "low", "close"]
+    ].copy()
+
     for col in ["open", "high", "low", "close"]:
-        df[col] = pd.to_numeric(
-            df[col],
+        df1[col] = pd.to_numeric(
+            df1[col],
             errors="coerce"
         )
 
-    df = df.sort_values("datetime")
-    df = df.reset_index(drop=True)
+    df1 = df1.dropna()
+
+    # Troviamo la candela più vecchia del primo blocco
+    data_piu_vecchia = df1["datetime"].min()
+
+    # ========================================================
+    # BLOCCO 2 — 5000 candele precedenti
+    # ========================================================
+
+    data_fine_secondo_blocco = (
+        data_piu_vecchia - pd.Timedelta(minutes=5)
+    )
+
+    params2 = {
+        "symbol": "XAU/USD",
+        "interval": "5min",
+        "outputsize": 5000,
+        "apikey": API_KEY,
+        "format": "JSON",
+        "timezone": "UTC",
+        "end_date": data_fine_secondo_blocco.strftime(
+            "%Y-%m-%dT%H:%M:%S"
+        ),
+        "order": "desc"
+    }
+
+    valori2 = richiesta(params2)
+
+    df2 = pd.DataFrame(valori2)
+
+    df2["datetime"] = pd.to_datetime(
+        df2["datetime"],
+        utc=True
+    )
+
+    df2 = df2[
+        ["datetime", "open", "high", "low", "close"]
+    ].copy()
+
+    for col in ["open", "high", "low", "close"]:
+        df2[col] = pd.to_numeric(
+            df2[col],
+            errors="coerce"
+        )
+
+    df2 = df2.dropna()
+
+    # ========================================================
+    # UNIONE DEI DUE BLOCCHI
+    # ========================================================
+
+    df = pd.concat(
+        [df1, df2],
+        ignore_index=True
+    )
+
+    # Elimina eventuali duplicati
+    df = df.drop_duplicates(
+        subset=["datetime"]
+    )
+
+    # Ordine cronologico
+    df = df.sort_values(
+        "datetime"
+    ).reset_index(drop=True)
+
+    print(
+        f"Candele scaricate: {len(df)}"
+    )
+
+    print(
+        f"Da: {df['datetime'].iloc[0]}"
+    )
+
+    print(
+        f"A: {df['datetime'].iloc[-1]}"
+    )
 
     return df
 
