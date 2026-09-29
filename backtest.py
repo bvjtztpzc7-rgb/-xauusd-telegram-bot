@@ -1126,66 +1126,103 @@ def calcola_metriche(operazioni):
 # ============================================================
 
 def stampa_metriche(
+
     nome,
+
     descrizione,
+
     metriche
+
 ):
 
     print()
+
     print("=" * 65)
+
     print("📌", nome)
+
     print(descrizione)
+
     print("-" * 65)
 
     print(
+
         f"Operazioni: {metriche['operazioni']}"
+
     )
 
     print(
+
         f"TP: {metriche['tp']}"
+
     )
 
     print(
+
         f"SL: {metriche['sl']}"
+
     )
 
     print(
-        f"Win rate: {metriche['win_rate']:.2f}%"
+
+        f"Win rate: {float(metriche['win_rate']):.2f}%"
+
     )
 
     print(
+
         f"Risultato prezzo: "
-        f"{metriche['risultato']:.2f}"
+
+        f"{float(metriche['risultato']):.2f}"
+
     )
 
     print(
+
         f"Profit Factor: "
-        f"{metriche['profit_factor']:.2f}"
+
+        f"{float(metriche['profit_factor']):.2f}"
+
     )
 
     print(
+
         f"Media vincita: "
-        f"{metriche['media_vincita']:.2f}"
+
+        f"{float(metriche['media_vincita']):.2f}"
+
     )
 
     print(
+
         f"Media perdita: "
-        f"{metriche['media_perdita']:.2f}"
+
+        f"{float(metriche['media_perdita']):.2f}"
+
     )
 
     print(
+
         f"Drawdown massimo: "
-        f"{metriche['drawdown']:.2f}"
+
+        f"{float(metriche['drawdown']):.2f}"
+
     )
 
     print(
+
         f"Max serie vittorie: "
+
         f"{metriche['max_win_streak']}"
+
     )
 
     print(
+
         f"Max serie perdite: "
+
         f"{metriche['max_loss_streak']}"
+
     )
 
     print()
@@ -1193,18 +1230,21 @@ def stampa_metriche(
     print("📈 BUY")
 
     print(
-        f"Operazioni: "
-        f"{metriche['buy']}"
+
+        f"Operazioni: {metriche['buy']}"
+
     )
 
     print(
-        f"TP: "
-        f"{metriche['buy_tp']}"
+
+        f"TP: {metriche['buy_tp']}"
+
     )
 
     print(
-        f"SL: "
-        f"{metriche['buy_sl']}"
+
+        f"SL: {metriche['buy_sl']}"
+
     )
 
     print()
@@ -1212,18 +1252,21 @@ def stampa_metriche(
     print("📉 SELL")
 
     print(
-        f"Operazioni: "
-        f"{metriche['sell']}"
+
+        f"Operazioni: {metriche['sell']}"
+
     )
 
     print(
-        f"TP: "
-        f"{metriche['sell_tp']}"
+
+        f"TP: {metriche['sell_tp']}"
+
     )
 
     print(
-        f"SL: "
-        f"{metriche['sell_sl']}"
+
+        f"SL: {metriche['sell_sl']}"
+
     )
 
 
