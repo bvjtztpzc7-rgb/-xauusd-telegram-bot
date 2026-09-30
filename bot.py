@@ -382,12 +382,12 @@ def analizza_xauusd():
     if segnale == "BUY":
 
         sl = prezzo - (1.5 * atr)
-        tp = prezzo + (2.5 * atr)
+        tp = prezzo + (2.0 * atr)
 
     elif segnale == "SELL":
 
         sl = prezzo + (1.5 * atr)
-        tp = prezzo - (2.5 * atr)
+        tp = prezzo - (2.0 * atr)
 
     # --------------------------------------------------------
     # DIAGNOSTICA
