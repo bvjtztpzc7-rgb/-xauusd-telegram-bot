@@ -1,6 +1,7 @@
 import os
 import requests
 import pandas as pd
+from datetime import datetime, timezone, timedelta
 from zoneinfo import ZoneInfo
 
 
@@ -20,6 +21,10 @@ if not API_KEY:
 
 if not CHAT_ID:
     raise RuntimeError("TELEGRAM_CHAT_ID non configurato")
+
+
+ROME_TZ = ZoneInfo("Europe/Rome")
+UTC_TZ = timezone.utc
 
 
 # ============================================================
@@ -63,6 +68,7 @@ def scarica_dati():
         "symbol": "XAU/USD",
         "interval": "5min",
         "outputsize": 500,
+        "timezone": "UTC",
         "apikey": API_KEY
     }
 
@@ -85,10 +91,19 @@ def scarica_dati():
 
     df = pd.DataFrame(dati["values"])
 
+    # --------------------------------------------------------
+    # TIMESTAMP
+    # Twelve Data → UTC
+    # --------------------------------------------------------
+
     df["datetime"] = pd.to_datetime(
         df["datetime"],
         utc=True
     )
+
+    # --------------------------------------------------------
+    # PREZZI
+    # --------------------------------------------------------
 
     for col in [
         "open",
@@ -104,12 +119,91 @@ def scarica_dati():
 
     df = (
         df
-        .dropna()
+        .dropna(subset=[
+            "datetime",
+            "open",
+            "high",
+            "low",
+            "close"
+        ])
         .sort_values("datetime")
+        .drop_duplicates(
+            subset=["datetime"],
+            keep="last"
+        )
         .reset_index(drop=True)
     )
 
-    return df
+    # --------------------------------------------------------
+    # CONTROLLO ORARIO
+    # --------------------------------------------------------
+
+    adesso_utc = pd.Timestamp.now(tz="UTC")
+
+    print("")
+    print("🕐 CONTROLLO DATI")
+    print("----------------------------------------")
+    print(
+        "Ora attuale UTC:",
+        adesso_utc.strftime("%d/%m/%Y %H:%M:%S")
+    )
+
+    print(
+        "Ultimo timestamp ricevuto:",
+        df["datetime"].iloc[-1].strftime("%d/%m/%Y %H:%M:%S UTC")
+    )
+
+    # --------------------------------------------------------
+    # ELIMINA EVENTUALI DATI FUTURI
+    # --------------------------------------------------------
+
+    df = df[
+        df["datetime"] <= adesso_utc
+    ].copy()
+
+    if df.empty:
+
+        print("❌ Nessun dato valido non futuro")
+
+        return None
+
+    # --------------------------------------------------------
+    # INDIVIDUA L'ULTIMA CANDELA COMPLETAMENTE CHIUSA
+    # --------------------------------------------------------
+
+    durata_candela = pd.Timedelta(minutes=5)
+
+    ultima_candela_chiusa = (
+        adesso_utc - durata_candela
+    )
+
+    df_chiuse = df[
+        df["datetime"] + durata_candela
+        <= adesso_utc
+    ].copy()
+
+    if df_chiuse.empty:
+
+        print("❌ Nessuna candela 5m completamente chiusa")
+
+        return None
+
+    print(
+        "Ultima candela 5m chiusa:",
+        df_chiuse["datetime"].iloc[-1]
+        .strftime("%d/%m/%Y %H:%M UTC")
+    )
+
+    print(
+        "Ultima candela 5m chiusa (Roma):",
+        df_chiuse["datetime"].iloc[-1]
+        .astimezone(ROME_TZ)
+        .strftime("%d/%m/%Y %H:%M")
+    )
+
+    print("----------------------------------------")
+
+    return df_chiuse.reset_index(drop=True)
 
 
 # ============================================================
@@ -140,7 +234,9 @@ def calcola_indicatori(df):
         .mean()
     )
 
+    # --------------------------------------------------------
     # MACD
+    # --------------------------------------------------------
 
     ema12 = (
         df["close"]
@@ -171,7 +267,9 @@ def calcola_indicatori(df):
         .mean()
     )
 
+    # --------------------------------------------------------
     # RSI 14
+    # --------------------------------------------------------
 
     delta = df["close"].diff()
 
@@ -206,7 +304,9 @@ def calcola_indicatori(df):
         (100 / (1 + rs))
     )
 
+    # --------------------------------------------------------
     # ATR 14
+    # --------------------------------------------------------
 
     high_low = (
         df["high"] -
@@ -265,6 +365,25 @@ def calcola_trend_15m(df):
         .reset_index()
     )
 
+    # --------------------------------------------------------
+    # Teniamo solo candele 15m completamente chiuse
+    # --------------------------------------------------------
+
+    adesso_utc = pd.Timestamp.now(tz="UTC")
+
+    df_15m = df_15m[
+        df_15m["datetime"] + pd.Timedelta(minutes=15)
+        <= adesso_utc
+    ].copy()
+
+    if len(df_15m) < 50:
+
+        return "NEUTRAL", None
+
+    # --------------------------------------------------------
+    # EMA 20 / 50
+    # --------------------------------------------------------
+
     df_15m["EMA20_15"] = (
         df_15m["close"]
         .ewm(
@@ -283,18 +402,19 @@ def calcola_trend_15m(df):
         .mean()
     )
 
-    if len(df_15m) < 3:
-        return "NEUTRAL", None
-
-    ultima = df_15m.iloc[-2]
+    # Ultima candela 15m COMPLETAMENTE CHIUSA
+    ultima = df_15m.iloc[-1]
 
     if ultima["EMA20_15"] > ultima["EMA50_15"]:
+
         trend = "BULLISH"
 
     elif ultima["EMA20_15"] < ultima["EMA50_15"]:
+
         trend = "BEARISH"
 
     else:
+
         trend = "NEUTRAL"
 
     return trend, ultima["datetime"]
@@ -319,8 +439,12 @@ def analizza_xauusd():
 
     df = calcola_indicatori(df)
 
-    # Ultima candela completamente chiusa
-    candela = df.iloc[-2]
+    # --------------------------------------------------------
+    # Usiamo direttamente l'ultima candela 5m già verificata
+    # come COMPLETAMENTE CHIUSA
+    # --------------------------------------------------------
+
+    candela = df.iloc[-1]
 
     trend_15m, trend_datetime = (
         calcola_trend_15m(df)
@@ -335,7 +459,7 @@ def analizza_xauusd():
     atr = candela["ATR"]
 
     # --------------------------------------------------------
-    # CONDIZIONI BUY
+    # BUY
     # --------------------------------------------------------
 
     buy_ema = ema20 > ema50
@@ -344,7 +468,7 @@ def analizza_xauusd():
     buy_trend = trend_15m == "BULLISH"
 
     # --------------------------------------------------------
-    # CONDIZIONI SELL
+    # SELL
     # --------------------------------------------------------
 
     sell_ema = ema20 < ema50
@@ -382,24 +506,44 @@ def analizza_xauusd():
     if segnale == "BUY":
 
         sl = prezzo - (1.5 * atr)
-        tp = prezzo + (2.0 * atr)
+
+        # CORRETTO: 2.5 ATR
+        tp = prezzo + (2.5 * atr)
 
     elif segnale == "SELL":
 
         sl = prezzo + (1.5 * atr)
-        tp = prezzo - (2.0 * atr)
+
+        # CORRETTO: 2.5 ATR
+        tp = prezzo - (2.5 * atr)
 
     # --------------------------------------------------------
     # DIAGNOSTICA
     # --------------------------------------------------------
+
+    candela_roma = (
+        candela["datetime"]
+        .astimezone(ROME_TZ)
+    )
 
     print("")
     print("========================================")
     print("📊 ANALISI XAU/USD")
     print("========================================")
 
-    print(f"⏰ Candela: {candela['datetime'].astimezone(ZoneInfo('Europe/Rome')).strftime('%d/%m/%Y %H:%M')}")
-    print(f"💰 Prezzo: {prezzo:.2f}")
+    print(
+        f"⏰ Candela UTC: "
+        f"{candela['datetime'].strftime('%d/%m/%Y %H:%M')}"
+    )
+
+    print(
+        f"🇮🇹 Candela Roma: "
+        f"{candela_roma.strftime('%d/%m/%Y %H:%M')}"
+    )
+
+    print(
+        f"💰 Prezzo: {prezzo:.2f}"
+    )
 
     print("")
     print(f"EMA20: {ema20:.4f}")
@@ -411,7 +555,15 @@ def analizza_xauusd():
 
     print("")
     print(f"📈 Trend 15m: {trend_15m}")
-    print(f"🕐 Ultimo trend 15m chiuso: {trend_datetime}")
+
+    if trend_datetime is not None:
+
+        print(
+            "🕐 Ultimo trend 15m chiuso:",
+            trend_datetime
+            .astimezone(ROME_TZ)
+            .strftime("%d/%m/%Y %H:%M")
+        )
 
     print("")
     print("🟢 BUY")
@@ -453,6 +605,13 @@ def analizza_xauusd():
 
     print("")
     print(f"➡️ SEGNALE: {segnale}")
+
+    if sl is not None:
+        print(f"🛑 SL: {sl:.2f}")
+
+    if tp is not None:
+        print(f"🎯 TP: {tp:.2f}")
+
     print("========================================")
 
     return {
@@ -478,12 +637,22 @@ def analizza_xauusd():
 
 def crea_messaggio(r):
 
-    emoji = "🟢" if r["signal"] == "BUY" else "🔴"
+    emoji = (
+        "🟢"
+        if r["signal"] == "BUY"
+        else "🔴"
+    )
+
+    candela_roma = (
+        r["datetime"]
+        .astimezone(ROME_TZ)
+        .strftime("%d/%m/%Y %H:%M")
+    )
 
     return (
         "🧪 PAPER/DEMO\n\n"
         f"{emoji} XAU/USD — {r['signal']}\n\n"
-        f"⏰ Candela: {r['datetime'].astimezone(ZoneInfo('Europe/Rome')).strftime('%d/%m/%Y %H:%M')}\n"
+        f"⏰ Candela: {candela_roma}\n"
         f"💰 Entry: {r['price']:.2f}\n"
         f"🛑 SL: {r['sl']:.2f}\n"
         f"🎯 TP: {r['tp']:.2f}\n\n"
