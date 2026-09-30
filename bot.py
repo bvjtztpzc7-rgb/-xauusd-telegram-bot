@@ -398,7 +398,7 @@ def analizza_xauusd():
     print("📊 ANALISI XAU/USD")
     print("========================================")
 
-    print(f"⏰ Candela: {r['datetime'].astimezone(ZoneInfo('Europe/Rome')).strftime('%d/%m/%Y %H:%M')}\n")
+    print(f"⏰ Candela: {candela['datetime'].astimezone(ZoneInfo('Europe/Rome')).strftime('%d/%m/%Y %H:%M')}")
     print(f"💰 Prezzo: {prezzo:.2f}")
 
     print("")
