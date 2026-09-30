@@ -1,6 +1,7 @@
 import os
 import requests
 import pandas as pd
+from zoneinfo import ZoneInfo
 
 
 # ============================================================
@@ -381,12 +382,12 @@ def analizza_xauusd():
     if segnale == "BUY":
 
         sl = prezzo - (1.5 * atr)
-        tp = prezzo + (2.0 * atr)
+        tp = prezzo + (2.5 * atr)
 
     elif segnale == "SELL":
 
         sl = prezzo + (1.5 * atr)
-        tp = prezzo - (2.0 * atr)
+        tp = prezzo - (2.5 * atr)
 
     # --------------------------------------------------------
     # DIAGNOSTICA
@@ -397,7 +398,7 @@ def analizza_xauusd():
     print("📊 ANALISI XAU/USD")
     print("========================================")
 
-    print(f"⏰ Candela: {candela['datetime']}")
+    print(f"⏰ Candela: {r['datetime'].astimezone(ZoneInfo('Europe/Rome')).strftime('%d/%m/%Y %H:%M')}\n")
     print(f"💰 Prezzo: {prezzo:.2f}")
 
     print("")
@@ -482,7 +483,7 @@ def crea_messaggio(r):
     return (
         "🧪 PAPER/DEMO\n\n"
         f"{emoji} XAU/USD — {r['signal']}\n\n"
-        f"⏰ Candela: {r['datetime']}\n"
+        f"⏰ Candela: {r['datetime'].astimezone(ZoneInfo('Europe/Rome')).strftime('%d/%m/%Y %H:%M')}\n"
         f"💰 Entry: {r['price']:.2f}\n"
         f"🛑 SL: {r['sl']:.2f}\n"
         f"🎯 TP: {r['tp']:.2f}\n\n"
