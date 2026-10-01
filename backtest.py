@@ -2227,6 +2227,86 @@ def print_top_analysis(
     print_separator(title)
 
     if df.empty:
+        print("Nessun dato disponibile.")
+        return
+
+    # --------------------------------------------------------
+    # DATAFRAME DELLE CORRELAZIONI
+    # --------------------------------------------------------
+
+    if "feature" in df.columns:
+
+        output = df.copy()
+
+        if "abs_corr_result_R" in output.columns:
+
+            output = output.sort_values(
+                "abs_corr_result_R",
+                ascending=False
+            ).head(n)
+
+        else:
+
+            output = output.head(n)
+
+        print(
+            output.to_string(
+                index=False
+            )
+        )
+
+        return
+
+    # --------------------------------------------------------
+    # DATAFRAME DELLE CONDIZIONI
+    # --------------------------------------------------------
+
+    if "trades" not in df.columns:
+
+        print(
+            "Formato dataframe non riconosciuto."
+        )
+
+        print(
+            "Colonne disponibili:",
+            list(df.columns)
+        )
+
+        return
+
+    display_cols = [
+        "condition",
+        "trades",
+        "win_rate_pct",
+        "avg_R",
+        "total_R",
+        "profit_factor",
+        "max_drawdown_R",
+        "avg_MFE_ATR",
+        "avg_MAE_ATR"
+    ]
+
+    display_cols = [
+        c for c in display_cols
+        if c in df.columns
+    ]
+
+    output = df.sort_values(
+        ["trades", "avg_R"],
+        ascending=[False, False]
+    ).head(n)
+
+    print(
+        output[
+            display_cols
+        ].to_string(
+            index=False
+        )
+    )
+
+    print_separator(title)
+
+    if df.empty:
         print("Nessun gruppo sufficientemente grande.")
         return
 
