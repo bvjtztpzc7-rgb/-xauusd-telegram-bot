@@ -3,8 +3,7 @@ import time
 import math
 import requests
 import warnings
-import itertools
-from pathlib import Path
+from itertools import product
 
 import numpy as np
 import pandas as pd
@@ -16,17 +15,21 @@ warnings.filterwarnings("ignore")
 # CONFIGURAZIONE
 # ============================================================
 
-API_KEY = os.getenv("TWELVE_DATA_API_KEY")
-
 SYMBOL = "XAU/USD"
 INTERVAL = "5min"
 
-# Due blocchi da 5000 = fino a ~10.000 candele
-# circa 34 giorni di dati 5m complessivi.
-OUTPUTSIZE = 5000
-BLOCKS = 2
+API_KEY = os.getenv("TWELVE_DATA_API_KEY")
 
-# Strategia BASE attuale
+if not API_KEY:
+    raise RuntimeError("TWELVE_DATA_API_KEY non configurato")
+
+OUTPUT_DIR = "backtest_results_v3"
+os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+# -------------------------
+# Strategia base
+# -------------------------
+
 EMA_FAST = 20
 EMA_SLOW = 50
 
@@ -40,131 +43,141 @@ ATR_PERIOD = 14
 RSI_MIN = 30
 RSI_MAX = 65
 
-# Parametri standard del backtest
+# Base attuale
 BASE_TP_ATR = 2.5
 BASE_SL_ATR = 1.5
 
-# Orizzonte massimo per analizzare il comportamento successivo
-MAX_FORWARD_BARS = 288       # 24 ore su candele 5m
+# -------------------------
+# Orizzonte analisi
+# -------------------------
 
-# Orizzonti per MFE/MAE
-HORIZONS = {
-    "5m": 1,
-    "15m": 3,
-    "30m": 6,
-    "60m": 12,
-    "120m": 24,
-    "240m": 48,
-    "480m": 96,
-}
+MFE_MAE_HORIZON_BARS = 288      # 24 ore su 5m
+TRADE_MAX_BARS = 288             # massimo 24 ore
 
-# Target da studiare
-TP_ATR_LEVELS = [0.5, 1.0, 1.5, 2.0, 2.5, 3.0]
+# -------------------------
+# Download
+# -------------------------
 
-# Stop da studiare
-SL_ATR_LEVELS = [1.0, 1.5, 2.0]
+BLOCK_SIZE = 5000
+N_BLOCKS = 2
 
-# Percentuale development / verification
+# -------------------------
+# Split
+# -------------------------
+
 DEVELOPMENT_RATIO = 0.70
 
-# Cartella risultati
-OUTPUT_DIR = Path("backtest_results")
+# -------------------------
+# Progress
+# -------------------------
 
-
-# ============================================================
-# CONTROLLO API
-# ============================================================
-
-if not API_KEY:
-    raise RuntimeError(
-        "TWELVE_DATA_API_KEY non configurata nelle GitHub Secrets."
-    )
+PRINT_EVERY = 100
 
 
 # ============================================================
 # UTILITY
 # ============================================================
 
-def safe_float(value):
-    try:
-        return float(value)
-    except Exception:
-        return np.nan
-
-
-def print_separator(title=None):
+def print_separator(title=""):
     print("\n" + "=" * 80)
     if title:
         print(title)
         print("=" * 80)
 
 
+def safe_div(a, b):
+    if b is None or b == 0 or pd.isna(b):
+        return np.nan
+    return a / b
+
+
+def profit_factor_from_R(results):
+    if not results:
+        return np.nan
+
+    gains = sum(x for x in results if x > 0)
+    losses = abs(sum(x for x in results if x < 0))
+
+    if losses == 0:
+        return np.inf if gains > 0 else np.nan
+
+    return gains / losses
+
+
+def max_drawdown(values):
+    if len(values) == 0:
+        return np.nan
+
+    equity = np.cumsum(values)
+    peak = np.maximum.accumulate(np.concatenate([[0], equity]))
+    dd = peak[1:] - equity
+
+    return float(np.max(dd)) if len(dd) else 0.0
+
+
+def r_value(outcome, tp_atr, sl_atr):
+    if outcome == "TP":
+        return tp_atr / sl_atr
+
+    if outcome == "SL":
+        return -1.0
+
+    return 0.0
+
+
 # ============================================================
 # DOWNLOAD DATI
 # ============================================================
 
-def download_block(start_date=None, end_date=None, outputsize=5000):
-    """
-    Scarica un blocco di dati da Twelve Data.
-    """
-
-    url = "https://api.twelvedata.com/time_series"
-
+def download_block(end_date=None):
     params = {
         "symbol": SYMBOL,
         "interval": INTERVAL,
-        "outputsize": outputsize,
+        "outputsize": BLOCK_SIZE,
         "apikey": API_KEY,
         "format": "JSON",
         "timezone": "UTC",
     }
 
-    if start_date:
-        params["start_date"] = start_date
-
-    if end_date:
+    if end_date is not None:
         params["end_date"] = end_date
 
-    print(f"Download dati: {params}")
+    print("Download dati:", {
+        k: "***" if k == "apikey" else v
+        for k, v in params.items()
+    })
 
-    response = requests.get(url, params=params, timeout=60)
+    response = requests.get(
+        "https://api.twelvedata.com/time_series",
+        params=params,
+        timeout=60
+    )
 
-    if response.status_code != 200:
-        raise RuntimeError(
-            f"Twelve Data HTTP {response.status_code}: {response.text[:1000]}"
-        )
+    response.raise_for_status()
 
     data = response.json()
 
-    if "status" in data and data["status"] == "error":
-        raise RuntimeError(
-            f"Twelve Data error: {data.get('message', data)}"
-        )
+    if "values" not in data:
+        raise RuntimeError(f"Risposta Twelve Data non valida: {data}")
 
-    values = data.get("values")
+    df = pd.DataFrame(data["values"])
 
-    if not values:
-        raise RuntimeError(
-            f"Nessun dato ricevuto da Twelve Data: {data}"
-        )
-
-    df = pd.DataFrame(values)
-
-    if "datetime" not in df.columns:
-        raise RuntimeError("Colonna datetime mancante.")
+    if df.empty:
+        raise RuntimeError("Blocco dati vuoto")
 
     df["datetime"] = pd.to_datetime(
         df["datetime"],
-        utc=True,
-        errors="coerce"
+        utc=True
     )
 
-    for col in ["open", "high", "low", "close", "volume"]:
-        if col in df.columns:
-            df[col] = pd.to_numeric(
-                df[col],
-                errors="coerce"
-            )
+    for col in ["open", "high", "low", "close"]:
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+
+    if "volume" in df.columns:
+        df["volume"] = pd.to_numeric(
+            df["volume"],
+            errors="coerce"
+        )
 
     df = df.dropna(
         subset=["datetime", "open", "high", "low", "close"]
@@ -173,67 +186,57 @@ def download_block(start_date=None, end_date=None, outputsize=5000):
     df = df.sort_values("datetime")
     df = df.drop_duplicates("datetime")
 
+    print(
+        f"Ricevute {len(df)} candele | "
+        f"{df['datetime'].min()} -> {df['datetime'].max()}"
+    )
+
     return df
 
 
 def download_history():
-    """
-    Scarica più blocchi.
+    print_separator("DOWNLOAD STORICO")
 
-    Twelve Data restituisce normalmente le candele più recenti.
-    Per ottenere uno storico più ampio utilizziamo end_date
-    progressivamente più vecchi.
-    """
-
-    all_blocks = []
+    blocks = []
 
     end_date = None
 
-    for block_number in range(BLOCKS):
+    for i in range(N_BLOCKS):
+        print_separator(f"DOWNLOAD BLOCCO {i + 1}/{N_BLOCKS}")
 
-        print_separator(
-            f"DOWNLOAD BLOCCO {block_number + 1}/{BLOCKS}"
-        )
+        df = download_block(end_date)
 
-        try:
-            df = download_block(
-                end_date=end_date,
-                outputsize=OUTPUTSIZE
-            )
+        blocks.append(df)
 
-            if df.empty:
-                break
-
-            all_blocks.append(df)
-
+        if i < N_BLOCKS - 1:
             oldest = df["datetime"].min()
 
-            print(
-                f"Ricevute {len(df)} candele | "
-                f"{df['datetime'].min()} -> {df['datetime'].max()}"
-            )
-
-            # Spostiamo la finestra indietro.
+            # piccolo margine per evitare duplicazioni
             end_date = (
                 oldest - pd.Timedelta(minutes=5)
             ).strftime("%Y-%m-%d %H:%M:%S")
 
-            time.sleep(1)
+        time.sleep(1)
 
-        except Exception as e:
-            print(f"Errore nel blocco {block_number + 1}: {e}")
-            break
+    data = pd.concat(blocks, ignore_index=True)
 
-    if not all_blocks:
-        raise RuntimeError("Impossibile scaricare dati storici.")
+    data = (
+        data
+        .drop_duplicates("datetime")
+        .sort_values("datetime")
+        .reset_index(drop=True)
+    )
 
-    df = pd.concat(all_blocks, ignore_index=True)
+    print_separator("DATI STORICI")
 
-    df = df.sort_values("datetime")
-    df = df.drop_duplicates("datetime")
-    df = df.reset_index(drop=True)
+    print(f"Candele totali: {len(data)}")
+    print(
+        f"Periodo: "
+        f"{data['datetime'].min()} -> "
+        f"{data['datetime'].max()}"
+    )
 
-    return df
+    return data
 
 
 # ============================================================
@@ -241,7 +244,6 @@ def download_history():
 # ============================================================
 
 def calculate_rsi(series, period=14):
-
     delta = series.diff()
 
     gain = delta.clip(lower=0)
@@ -267,37 +269,31 @@ def calculate_rsi(series, period=14):
 
 
 def calculate_atr(df, period=14):
-
-    previous_close = df["close"].shift(1)
+    prev_close = df["close"].shift(1)
 
     tr1 = df["high"] - df["low"]
+    tr2 = (df["high"] - prev_close).abs()
+    tr3 = (df["low"] - prev_close).abs()
 
-    tr2 = (df["high"] - previous_close).abs()
-
-    tr3 = (df["low"] - previous_close).abs()
-
-    true_range = pd.concat(
+    tr = pd.concat(
         [tr1, tr2, tr3],
         axis=1
     ).max(axis=1)
 
-    atr = true_range.ewm(
+    return tr.ewm(
         alpha=1 / period,
         min_periods=period,
         adjust=False
     ).mean()
 
-    return atr
 
+def calculate_indicators(df):
 
-def add_indicators(df):
+    print_separator("CALCOLO INDICATORI")
 
     df = df.copy()
 
-    # --------------------------------------------------------
     # EMA
-    # --------------------------------------------------------
-
     df["ema20"] = df["close"].ewm(
         span=EMA_FAST,
         adjust=False
@@ -308,21 +304,36 @@ def add_indicators(df):
         adjust=False
     ).mean()
 
-    # --------------------------------------------------------
-    # MACD
-    # --------------------------------------------------------
+    # EMA distance
+    df["ema_distance"] = (
+        (df["ema20"] - df["ema50"])
+        / df["close"]
+        * 100
+    )
 
-    ema12 = df["close"].ewm(
+    # EMA slope
+    df["ema20_slope"] = (
+        df["ema20"] -
+        df["ema20"].shift(5)
+    )
+
+    df["ema50_slope"] = (
+        df["ema50"] -
+        df["ema50"].shift(5)
+    )
+
+    # MACD
+    ema_fast = df["close"].ewm(
         span=MACD_FAST,
         adjust=False
     ).mean()
 
-    ema26 = df["close"].ewm(
+    ema_slow = df["close"].ewm(
         span=MACD_SLOW,
         adjust=False
     ).mean()
 
-    df["macd"] = ema12 - ema26
+    df["macd"] = ema_fast - ema_slow
 
     df["macd_signal"] = df["macd"].ewm(
         span=MACD_SIGNAL,
@@ -334,177 +345,74 @@ def add_indicators(df):
         df["macd_signal"]
     )
 
-    # --------------------------------------------------------
-    # RSI
-    # --------------------------------------------------------
+    df["macd_change"] = (
+        df["macd_hist"] -
+        df["macd_hist"].shift(3)
+    )
 
+    # RSI
     df["rsi"] = calculate_rsi(
         df["close"],
         RSI_PERIOD
     )
 
-    # --------------------------------------------------------
-    # ATR
-    # --------------------------------------------------------
+    df["rsi_change"] = (
+        df["rsi"] -
+        df["rsi"].shift(3)
+    )
 
+    # ATR
     df["atr"] = calculate_atr(
         df,
         ATR_PERIOD
     )
 
-    # --------------------------------------------------------
-    # EMA FEATURES
-    # --------------------------------------------------------
-
-    df["ema_distance"] = (
-        df["ema20"] -
-        df["ema50"]
-    )
-
-    df["ema_distance_abs"] = (
-        df["ema_distance"].abs()
-    )
-
-    df["ema_distance_atr"] = (
-        df["ema_distance_abs"] /
-        df["atr"]
-    )
-
-    df["ema20_slope_1"] = (
-        df["ema20"] -
-        df["ema20"].shift(1)
-    )
-
-    df["ema20_slope_3"] = (
-        df["ema20"] -
-        df["ema20"].shift(3)
-    )
-
-    df["ema20_slope_6"] = (
-        df["ema20"] -
-        df["ema20"].shift(6)
-    )
-
-    df["ema50_slope_1"] = (
-        df["ema50"] -
-        df["ema50"].shift(1)
-    )
-
-    df["ema50_slope_3"] = (
-        df["ema50"] -
-        df["ema50"].shift(3)
-    )
-
-    df["ema50_slope_6"] = (
-        df["ema50"] -
-        df["ema50"].shift(6)
-    )
-
-    # --------------------------------------------------------
-    # RSI MOMENTUM
-    # --------------------------------------------------------
-
-    df["rsi_change_1"] = (
-        df["rsi"] -
-        df["rsi"].shift(1)
-    )
-
-    df["rsi_change_3"] = (
-        df["rsi"] -
-        df["rsi"].shift(3)
-    )
-
-    df["rsi_change_6"] = (
-        df["rsi"] -
-        df["rsi"].shift(6)
-    )
-
-    # --------------------------------------------------------
-    # MACD MOMENTUM
-    # --------------------------------------------------------
-
-    df["macd_change_1"] = (
-        df["macd"] -
-        df["macd"].shift(1)
-    )
-
-    df["macd_change_3"] = (
-        df["macd"] -
-        df["macd"].shift(3)
-    )
-
-    df["macd_change_6"] = (
-        df["macd"] -
-        df["macd"].shift(6)
-    )
-
-    df["macd_hist_change_1"] = (
-        df["macd_hist"] -
-        df["macd_hist"].shift(1)
-    )
-
-    df["macd_hist_change_3"] = (
-        df["macd_hist"] -
-        df["macd_hist"].shift(3)
-    )
-
-    # --------------------------------------------------------
-    # ATR / VOLATILITY
-    # --------------------------------------------------------
-
-    df["atr_change_1"] = (
-        df["atr"] -
-        df["atr"].shift(1)
-    )
-
-    df["atr_change_3"] = (
-        df["atr"] -
-        df["atr"].shift(3)
-    )
-
-    df["atr_mean_24"] = (
-        df["atr"]
-        .rolling(24)
-        .mean()
-    )
-
-    df["atr_relative_24"] = (
+    df["atr_pct"] = (
         df["atr"] /
-        df["atr_mean_24"]
+        df["close"] *
+        100
     )
 
-    df["atr_mean_48"] = (
+    # ATR regime
+    atr_median = (
         df["atr"]
-        .rolling(48)
-        .mean()
+        .rolling(200)
+        .median()
     )
 
-    df["atr_relative_48"] = (
+    df["atr_ratio"] = (
         df["atr"] /
-        df["atr_mean_48"]
+        atr_median
     )
 
-    # --------------------------------------------------------
-    # CANDLE FEATURES
-    # --------------------------------------------------------
-
-    df["candle_range"] = (
-        df["high"] -
-        df["low"]
+    df["atr_regime"] = np.select(
+        [
+            df["atr_ratio"] < 0.75,
+            df["atr_ratio"] > 1.25
+        ],
+        [
+            "LOW",
+            "HIGH"
+        ],
+        default="NORMAL"
     )
 
-    df["candle_body"] = (
+    # Candle structure
+    df["body"] = (
         df["close"] -
         df["open"]
     )
 
-    df["candle_body_abs"] = (
-        df["candle_body"].abs()
+    df["body_abs"] = df["body"].abs()
+
+    df["range"] = (
+        df["high"] -
+        df["low"]
     )
 
     df["body_ratio"] = (
-        df["candle_body_abs"] /
-        df["candle_range"].replace(0, np.nan)
+        df["body_abs"] /
+        df["range"].replace(0, np.nan)
     )
 
     df["upper_wick"] = (
@@ -517,282 +425,267 @@ def add_indicators(df):
         df["low"]
     )
 
-    df["upper_wick_ratio"] = (
-        df["upper_wick"] /
-        df["candle_range"].replace(0, np.nan)
+    df["body_atr"] = (
+        df["body_abs"] /
+        df["atr"]
     )
 
-    df["lower_wick_ratio"] = (
-        df["lower_wick"] /
-        df["candle_range"].replace(0, np.nan)
+    # Body buckets
+    df["body_bucket"] = pd.cut(
+        df["body_atr"],
+        bins=[
+            -np.inf,
+            0.25,
+            0.50,
+            1.00,
+            1.50,
+            np.inf
+        ],
+        labels=[
+            "VERY_SMALL",
+            "SMALL",
+            "MEDIUM",
+            "LARGE",
+            "VERY_LARGE"
+        ]
+    ).astype(str)
+
+    # EMA strength
+    df["ema_strength_value"] = (
+        df["ema_distance"].abs()
     )
 
-    df["close_position"] = (
-        (df["close"] - df["low"]) /
-        df["candle_range"].replace(0, np.nan)
+    df["ema_strength"] = pd.cut(
+        df["ema_strength_value"],
+        bins=[
+            -np.inf,
+            0.02,
+            0.05,
+            0.10,
+            np.inf
+        ],
+        labels=[
+            "VERY_WEAK",
+            "WEAK",
+            "MEDIUM",
+            "STRONG"
+        ]
+    ).astype(str)
+
+    # MACD strength
+    macd_abs = df["macd_hist"].abs()
+
+    macd_median = (
+        macd_abs
+        .rolling(200)
+        .median()
     )
 
-    df["candle_bullish"] = (
-        df["close"] > df["open"]
-    ).astype(int)
+    macd_ratio = (
+        macd_abs /
+        macd_median.replace(0, np.nan)
+    )
 
-    df["candle_bearish"] = (
-        df["close"] < df["open"]
-    ).astype(int)
+    df["macd_strength"] = np.select(
+        [
+            macd_ratio < 0.75,
+            macd_ratio > 1.50
+        ],
+        [
+            "WEAK",
+            "STRONG"
+        ],
+        default="NORMAL"
+    )
 
-    # --------------------------------------------------------
-    # MULTI-CANDLE MOMENTUM
-    # --------------------------------------------------------
+    # RSI buckets
+    df["rsi_bucket"] = pd.cut(
+        df["rsi"],
+        bins=[
+            0,
+            30,
+            40,
+            50,
+            60,
+            70,
+            100
+        ],
+        labels=[
+            "<30",
+            "30-40",
+            "40-50",
+            "50-60",
+            "60-70",
+            ">70"
+        ]
+    ).astype(str)
 
-    for bars, name in [
-        (3, "15m"),
-        (6, "30m"),
-        (12, "60m"),
-        (24, "120m"),
-    ]:
-        df[f"momentum_{name}"] = (
+    # Momentum
+    for n in [3, 6, 12, 24]:
+        df[f"momentum_{n}"] = (
             df["close"] /
-            df["close"].shift(bars) -
+            df["close"].shift(n) -
             1
         ) * 100
 
-        df[f"range_{name}"] = (
-            df["high"]
-            .rolling(bars)
-            .max()
-            -
-            df["low"]
-            .rolling(bars)
-            .min()
+    # Recent highs/lows
+    for n in [6, 12, 24, 48]:
+        df[f"high_distance_{n}"] = (
+            df[f"high_distance_{n}"] if
+            f"high_distance_{n}" in df.columns
+            else (
+                df["close"] /
+                df["high"].rolling(n).max() -
+                1
+            ) * 100
         )
 
-    # --------------------------------------------------------
-    # CANDLE SEQUENCES
-    # --------------------------------------------------------
-
-    df["bullish_count_3"] = (
-        df["candle_bullish"]
-        .rolling(3)
-        .sum()
-    )
-
-    df["bullish_count_6"] = (
-        df["candle_bullish"]
-        .rolling(6)
-        .sum()
-    )
-
-    df["bullish_count_12"] = (
-        df["candle_bullish"]
-        .rolling(12)
-        .sum()
-    )
-
-    # --------------------------------------------------------
-    # RECENT HIGH / LOW
-    # --------------------------------------------------------
-
-    for bars in [12, 24, 48, 96]:
-
-        recent_high = (
-            df["high"]
-            .rolling(bars)
-            .max()
-            .shift(1)
-        )
-
-        recent_low = (
-            df["low"]
-            .rolling(bars)
-            .min()
-            .shift(1)
-        )
-
-        df[f"recent_high_{bars}"] = recent_high
-
-        df[f"recent_low_{bars}"] = recent_low
-
-        df[f"distance_high_{bars}_atr"] = (
-            (recent_high - df["close"]).abs() /
-            df["atr"]
-        )
-
-        df[f"distance_low_{bars}_atr"] = (
-            (df["close"] - recent_low).abs() /
-            df["atr"]
-        )
+        df[f"low_distance_{n}"] = (
+            df["close"] /
+            df["low"].rolling(n).min() -
+            1
+        ) * 100
 
     return df
 
 
 # ============================================================
-# TIMEFRAME SUPERIORI
+# TIME FEATURES
 # ============================================================
 
-def build_higher_timeframe_context(df):
+def add_time_features(df):
 
-    base = df.copy()
+    df = df.copy()
 
-    temp = base.set_index("datetime")
+    df["hour_utc"] = df["datetime"].dt.hour
 
-    # --------------------------------------------------------
-    # 15 MINUTI
-    # --------------------------------------------------------
+    df["minute"] = df["datetime"].dt.minute
 
-    tf15 = temp.resample("15min").agg({
-        "open": "first",
-        "high": "max",
-        "low": "min",
-        "close": "last"
-    }).dropna()
-
-    tf15["ema20_15"] = (
-        tf15["close"]
-        .ewm(span=20, adjust=False)
-        .mean()
+    df["day_of_week"] = (
+        df["datetime"]
+        .dt.day_name()
     )
 
-    tf15["ema50_15"] = (
-        tf15["close"]
-        .ewm(span=50, adjust=False)
-        .mean()
-    )
-
-    tf15["trend_15"] = np.where(
-        tf15["ema20_15"] >
-        tf15["ema50_15"],
-        1,
-        np.where(
-            tf15["ema20_15"] <
-            tf15["ema50_15"],
-            -1,
-            0
-        )
-    )
-
-    tf15["ema_distance_15"] = (
-        tf15["ema20_15"] -
-        tf15["ema50_15"]
-    )
-
-    tf15["ema20_slope_15"] = (
-        tf15["ema20_15"] -
-        tf15["ema20_15"].shift(1)
-    )
-
-    tf15["ema50_slope_15"] = (
-        tf15["ema50_15"] -
-        tf15["ema50_15"].shift(1)
-    )
-
-    # IMPORTANT:
-    # shift(1) = usiamo solamente la candela 15m
-    # completamente chiusa prima del segnale.
-    tf15_context = tf15[
+    # Sessioni approssimative UTC
+    df["session"] = np.select(
         [
-            "trend_15",
-            "ema_distance_15",
-            "ema20_slope_15",
-            "ema50_slope_15"
-        ]
-    ].shift(1)
-
-    tf15_context = tf15_context.rename(
-        columns={
-            "trend_15": "trend_15",
-            "ema_distance_15": "ema_distance_15",
-            "ema20_slope_15": "ema20_slope_15",
-            "ema50_slope_15": "ema50_slope_15",
-        }
-    )
-
-    # --------------------------------------------------------
-    # 1 ORA
-    # --------------------------------------------------------
-
-    tf1h = temp.resample("1h").agg({
-        "open": "first",
-        "high": "max",
-        "low": "min",
-        "close": "last"
-    }).dropna()
-
-    tf1h["ema20_1h"] = (
-        tf1h["close"]
-        .ewm(span=20, adjust=False)
-        .mean()
-    )
-
-    tf1h["ema50_1h"] = (
-        tf1h["close"]
-        .ewm(span=50, adjust=False)
-        .mean()
-    )
-
-    tf1h["trend_1h"] = np.where(
-        tf1h["ema20_1h"] >
-        tf1h["ema50_1h"],
-        1,
-        np.where(
-            tf1h["ema20_1h"] <
-            tf1h["ema50_1h"],
-            -1,
-            0
-        )
-    )
-
-    tf1h["ema_distance_1h"] = (
-        tf1h["ema20_1h"] -
-        tf1h["ema50_1h"]
-    )
-
-    tf1h["ema20_slope_1h"] = (
-        tf1h["ema20_1h"] -
-        tf1h["ema20_1h"].shift(1)
-    )
-
-    tf1h["ema50_slope_1h"] = (
-        tf1h["ema50_1h"] -
-        tf1h["ema50_1h"].shift(1)
-    )
-
-    tf1h_context = tf1h[
+            df["hour_utc"].between(0, 6),
+            df["hour_utc"].between(7, 12),
+            df["hour_utc"].between(13, 17),
+            df["hour_utc"].between(18, 23)
+        ],
         [
-            "trend_1h",
-            "ema_distance_1h",
-            "ema20_slope_1h",
-            "ema50_slope_1h"
-        ]
-    ].shift(1)
+            "ASIA",
+            "EUROPE",
+            "US",
+            "LATE"
+        ],
+        default="OTHER"
+    )
 
-    # --------------------------------------------------------
-    # MERGE TEMPORALE
-    # --------------------------------------------------------
+    return df
 
-    result = base.copy()
 
-    result = pd.merge_asof(
-        result.sort_values("datetime"),
-        tf15_context.reset_index().sort_values("datetime"),
+# ============================================================
+# MULTI TIMEFRAME
+# ============================================================
+
+def build_higher_timeframes(df):
+
+    print_separator("COSTRUZIONE 15M + 1H")
+
+    base = df.set_index("datetime")
+
+    # 15m
+    df15 = (
+        base
+        .resample("15min")
+        .agg({
+            "open": "first",
+            "high": "max",
+            "low": "min",
+            "close": "last"
+        })
+        .dropna()
+    )
+
+    df15["ema20_15"] = df15["close"].ewm(
+        span=20,
+        adjust=False
+    ).mean()
+
+    df15["ema50_15"] = df15["close"].ewm(
+        span=50,
+        adjust=False
+    ).mean()
+
+    df15["trend15"] = np.where(
+        df15["ema20_15"] >
+        df15["ema50_15"],
+        "BULLISH",
+        "BEARISH"
+    )
+
+    # 1H
+    df1h = (
+        base
+        .resample("1h")
+        .agg({
+            "open": "first",
+            "high": "max",
+            "low": "min",
+            "close": "last"
+        })
+        .dropna()
+    )
+
+    df1h["ema20_1h"] = df1h["close"].ewm(
+        span=20,
+        adjust=False
+    ).mean()
+
+    df1h["ema50_1h"] = df1h["close"].ewm(
+        span=50,
+        adjust=False
+    ).mean()
+
+    df1h["trend1h"] = np.where(
+        df1h["ema20_1h"] >
+        df1h["ema50_1h"],
+        "BULLISH",
+        "BEARISH"
+    )
+
+    # Merge backward:
+    # important: use last CLOSED higher-timeframe candle
+    df = pd.merge_asof(
+        df.sort_values("datetime"),
+        df15[
+            ["trend15", "ema20_15", "ema50_15"]
+        ].reset_index(),
         on="datetime",
         direction="backward"
     )
 
-    result = pd.merge_asof(
-        result.sort_values("datetime"),
-        tf1h_context.reset_index().sort_values("datetime"),
+    df = pd.merge_asof(
+        df.sort_values("datetime"),
+        df1h[
+            ["trend1h", "ema20_1h", "ema50_1h"]
+        ].reset_index(),
         on="datetime",
         direction="backward"
     )
 
-    return result
+    return df
 
 
 # ============================================================
-# SEGNALI STRATEGIA BASE
+# SEGNALI
 # ============================================================
 
-def generate_base_signals(df):
+def generate_signals(df):
+
+    print_separator("GENERAZIONE SEGNALI BASE")
 
     df = df.copy()
 
@@ -801,7 +694,7 @@ def generate_base_signals(df):
         (df["macd"] > df["macd_signal"]) &
         (df["rsi"] > RSI_MIN) &
         (df["rsi"] < RSI_MAX) &
-        (df["trend_15"] == 1)
+        (df["trend15"] == "BULLISH")
     )
 
     bearish = (
@@ -809,1414 +702,1235 @@ def generate_base_signals(df):
         (df["macd"] < df["macd_signal"]) &
         (df["rsi"] > RSI_MIN) &
         (df["rsi"] < RSI_MAX) &
-        (df["trend_15"] == -1)
+        (df["trend15"] == "BEARISH")
     )
 
-    df["signal"] = np.where(
-        bullish,
-        "BUY",
-        np.where(
-            bearish,
-            "SELL",
-            ""
-        )
+    df["signal"] = np.select(
+        [bullish, bearish],
+        ["BUY", "SELL"],
+        default=""
     )
+
+    df["signal_id"] = (
+        df["signal"]
+        .ne("")
+        .cumsum()
+    )
+
+    total = (df["signal"] != "").sum()
+    buys = (df["signal"] == "BUY").sum()
+    sells = (df["signal"] == "SELL").sum()
+
+    print(f"BUY/SELL totali: {total}")
+    print(f"BUY: {buys}")
+    print(f"SELL: {sells}")
 
     return df
 
 
 # ============================================================
-# CLASSIFICAZIONI
+# SIGNAL EPISODES
 # ============================================================
 
-def classify_rsi(value):
+def classify_signal_episodes(df):
 
-    if pd.isna(value):
-        return "NA"
+    df = df.copy()
 
-    if value < 40:
-        return "30-40"
+    signal_mask = df["signal"] != ""
 
-    if value < 50:
-        return "40-50"
+    df["episode_id"] = np.nan
+    df["episode_first"] = False
 
-    if value < 60:
-        return "50-60"
+    current_episode = 0
+    previous_signal = None
 
-    return "60-65"
+    for idx in df.index:
 
+        signal = df.at[idx, "signal"]
 
-def classify_atr_relative(value):
-
-    if pd.isna(value):
-        return "NA"
-
-    if value < 0.80:
-        return "LOW"
-
-    if value < 1.20:
-        return "NORMAL"
-
-    return "HIGH"
-
-
-def classify_strength(value):
-
-    if pd.isna(value):
-        return "NA"
-
-    if value < 0.25:
-        return "WEAK"
-
-    if value < 0.75:
-        return "MEDIUM"
-
-    return "STRONG"
-
-
-def classify_body(value):
-
-    if pd.isna(value):
-        return "NA"
-
-    if value < 0.30:
-        return "SMALL"
-
-    if value < 0.60:
-        return "MEDIUM"
-
-    return "LARGE"
-
-
-# ============================================================
-# MFE / MAE
-# ============================================================
-
-def calculate_forward_metrics(
-    df,
-    entry_index,
-    direction,
-    entry_price,
-    atr
-):
-
-    result = {}
-
-    if pd.isna(atr) or atr <= 0:
-        return result
-
-    end_index = min(
-        len(df) - 1,
-        entry_index + MAX_FORWARD_BARS
-    )
-
-    future = df.iloc[
-        entry_index:end_index + 1
-    ]
-
-    if direction == "BUY":
-
-        favorable = (
-            future["high"] -
-            entry_price
-        )
-
-        adverse = (
-            entry_price -
-            future["low"]
-        )
-
-    else:
-
-        favorable = (
-            entry_price -
-            future["low"]
-        )
-
-        adverse = (
-            future["high"] -
-            entry_price
-        )
-
-    # --------------------------------------------------------
-    # MFE / MAE assoluti
-    # --------------------------------------------------------
-
-    result["mfe_price"] = max(
-        0.0,
-        float(favorable.max())
-    )
-
-    result["mae_price"] = max(
-        0.0,
-        float(adverse.max())
-    )
-
-    result["mfe_atr"] = (
-        result["mfe_price"] / atr
-    )
-
-    result["mae_atr"] = (
-        result["mae_price"] / atr
-    )
-
-    # --------------------------------------------------------
-    # MFE / MAE per orizzonte
-    # --------------------------------------------------------
-
-    for horizon_name, bars in HORIZONS.items():
-
-        horizon_end = min(
-            entry_index + bars,
-            end_index
-        )
-
-        horizon = df.iloc[
-            entry_index:horizon_end + 1
-        ]
-
-        if horizon.empty:
+        if signal == "":
             continue
 
-        if direction == "BUY":
+        if signal != previous_signal:
+            current_episode += 1
 
-            fav = (
-                horizon["high"] -
-                entry_price
-            )
+        df.at[idx, "episode_id"] = current_episode
 
-            adv = (
-                entry_price -
-                horizon["low"]
-            )
+        previous_signal = signal
 
-        else:
+    signal_rows = df[signal_mask].copy()
 
-            fav = (
-                entry_price -
-                horizon["low"]
-            )
-
-            adv = (
-                horizon["high"] -
-                entry_price
-            )
-
-        result[
-            f"mfe_{horizon_name}_atr"
-        ] = max(
-            0.0,
-            float(fav.max()) / atr
+    if not signal_rows.empty:
+        first_indices = (
+            signal_rows
+            .groupby("episode_id")
+            .head(1)
+            .index
         )
 
-        result[
-            f"mae_{horizon_name}_atr"
-        ] = max(
-            0.0,
-            float(adv.max()) / atr
-        )
+        df.loc[first_indices, "episode_first"] = True
 
-    # --------------------------------------------------------
-    # TARGET RAGGIUNTI
-    # --------------------------------------------------------
-
-    for target in TP_ATR_LEVELS:
-
-        target_price_distance = target * atr
-
-        if direction == "BUY":
-
-            reached = (
-                future["high"] >=
-                entry_price +
-                target_price_distance
-            )
-
-        else:
-
-            reached = (
-                future["low"] <=
-                entry_price -
-                target_price_distance
-            )
-
-        indices = np.where(
-            reached.values
-        )[0]
-
-        result[
-            f"reach_{target:g}atr"
-        ] = int(len(indices) > 0)
-
-        if len(indices) > 0:
-
-            bars_to_target = int(
-                indices[0]
-            )
-
-            result[
-                f"bars_to_{target:g}atr"
-            ] = bars_to_target
-
-            result[
-                f"minutes_to_{target:g}atr"
-            ] = bars_to_target * 5
-
-        else:
-
-            result[
-                f"bars_to_{target:g}atr"
-            ] = np.nan
-
-            result[
-                f"minutes_to_{target:g}atr"
-            ] = np.nan
-
-    return result
+    return df
 
 
 # ============================================================
-# TP / SL REALISTICO
+# TRADE ENGINE
 # ============================================================
 
-def evaluate_trade(
+def simulate_trade(
     df,
     entry_index,
     direction,
-    entry_price,
-    atr
+    tp_atr,
+    sl_atr,
+    max_bars=TRADE_MAX_BARS
 ):
 
-    if pd.isna(atr) or atr <= 0:
-        return {}
+    # signal candle -> next candle open
+    if entry_index + 1 >= len(df):
+        return None
 
-    tp_distance = BASE_TP_ATR * atr
-    sl_distance = BASE_SL_ATR * atr
+    signal_row = df.iloc[entry_index]
+    entry_row = df.iloc[entry_index + 1]
+
+    entry_price = float(entry_row["open"])
+    atr = float(signal_row["atr"])
+
+    if not np.isfinite(entry_price):
+        return None
+
+    if not np.isfinite(atr) or atr <= 0:
+        return None
 
     if direction == "BUY":
 
         tp_price = (
             entry_price +
-            tp_distance
+            tp_atr * atr
         )
 
         sl_price = (
             entry_price -
-            sl_distance
+            sl_atr * atr
         )
 
     else:
 
         tp_price = (
             entry_price -
-            tp_distance
+            tp_atr * atr
         )
 
         sl_price = (
             entry_price +
-            sl_distance
+            sl_atr * atr
         )
 
     end_index = min(
-        len(df) - 1,
-        entry_index + MAX_FORWARD_BARS
+        entry_index + 1 + max_bars,
+        len(df) - 1
     )
 
-    future = df.iloc[
-        entry_index:end_index + 1
-    ]
-
     outcome = "TIMEOUT"
-    exit_price = np.nan
-    exit_index = np.nan
+    exit_index = end_index
 
-    for offset, (_, candle) in enumerate(
-        future.iterrows()
+    mfe = 0.0
+    mae = 0.0
+
+    same_candle = False
+
+    for j in range(
+        entry_index + 1,
+        end_index + 1
     ):
 
-        high = candle["high"]
-        low = candle["low"]
+        row = df.iloc[j]
+
+        high = float(row["high"])
+        low = float(row["low"])
 
         if direction == "BUY":
 
-            hit_tp = high >= tp_price
-            hit_sl = low <= sl_price
+            favorable = (
+                high - entry_price
+            ) / atr
+
+            adverse = (
+                entry_price - low
+            ) / atr
+
+            tp_hit = high >= tp_price
+            sl_hit = low <= sl_price
 
         else:
 
-            hit_tp = low <= tp_price
-            hit_sl = high >= sl_price
+            favorable = (
+                entry_price - low
+            ) / atr
 
-        # ----------------------------------------------------
-        # Se TP e SL vengono toccati nella stessa candela,
-        # NON possiamo sapere dal solo OHLC quale sia avvenuto
-        # prima.
-        #
-        # Per evitare un'ottimizzazione favorevole assumiamo
-        # CONSERVATIVAMENTE che abbia colpito lo SL.
-        # ----------------------------------------------------
+            adverse = (
+                high - entry_price
+            ) / atr
 
-        if hit_tp and hit_sl:
+            tp_hit = low <= tp_price
+            sl_hit = high >= sl_price
 
-            outcome = "SL_AND_TP_SAME_CANDLE"
+        mfe = max(mfe, favorable)
+        mae = max(mae, adverse)
 
-            exit_price = sl_price
-            exit_index = (
-                entry_index +
-                offset
-            )
+        if tp_hit and sl_hit:
 
+            same_candle = True
+
+            # Conservative assumption
+            outcome = "SL"
+            exit_index = j
             break
 
-        elif hit_tp:
+        if tp_hit:
 
             outcome = "TP"
-
-            exit_price = tp_price
-            exit_index = (
-                entry_index +
-                offset
-            )
-
+            exit_index = j
             break
 
-        elif hit_sl:
+        if sl_hit:
 
             outcome = "SL"
-
-            exit_price = sl_price
-            exit_index = (
-                entry_index +
-                offset
-            )
-
+            exit_index = j
             break
 
-    if outcome == "TIMEOUT":
-
-        last_close = future.iloc[-1]["close"]
-
-        exit_price = last_close
-
-        exit_index = end_index
-
-    if direction == "BUY":
-
-        result_r = (
-            exit_price -
-            entry_price
-        ) / sl_distance
-
-    else:
-
-        result_r = (
-            entry_price -
-            exit_price
-        ) / sl_distance
-
-    bars_in_trade = (
-        int(exit_index) -
-        entry_index
+    result_R = r_value(
+        outcome,
+        tp_atr,
+        sl_atr
     )
 
     return {
+        "signal_index": entry_index,
+        "signal_time": signal_row["datetime"],
+        "entry_time": entry_row["datetime"],
+        "exit_time": df.iloc[exit_index]["datetime"],
+        "direction": direction,
+
+        "entry_price": entry_price,
         "tp_price": tp_price,
         "sl_price": sl_price,
+
+        "atr": atr,
+
+        "tp_atr": tp_atr,
+        "sl_atr": sl_atr,
+
         "outcome": outcome,
-        "exit_price": exit_price,
-        "bars_in_trade": bars_in_trade,
-        "minutes_in_trade": bars_in_trade * 5,
-        "result_R": result_r,
+        "result_R": result_R,
+
+        "bars_held": exit_index - entry_index - 1,
+
+        "minutes_held": (
+            exit_index - entry_index - 1
+        ) * 5,
+
+        "MFE_ATR": mfe,
+        "MAE_ATR": mae,
+
+        "same_candle_tp_sl": same_candle,
+
+        # Features at signal time
+        "rsi": signal_row["rsi"],
+        "rsi_bucket": signal_row["rsi_bucket"],
+
+        "ema_distance": signal_row["ema_distance"],
+        "ema_strength": signal_row["ema_strength"],
+
+        "macd_hist": signal_row["macd_hist"],
+        "macd_strength": signal_row["macd_strength"],
+
+        "atr_ratio": signal_row["atr_ratio"],
+        "atr_regime": signal_row["atr_regime"],
+
+        "body_atr": signal_row["body_atr"],
+        "body_bucket": signal_row["body_bucket"],
+
+        "momentum_3": signal_row["momentum_3"],
+        "momentum_6": signal_row["momentum_6"],
+        "momentum_12": signal_row["momentum_12"],
+        "momentum_24": signal_row["momentum_24"],
+
+        "ema20_slope": signal_row["ema20_slope"],
+        "ema50_slope": signal_row["ema50_slope"],
+
+        "trend15": signal_row["trend15"],
+        "trend1h": signal_row["trend1h"],
+
+        "hour_utc": signal_row["hour_utc"],
+        "session": signal_row["session"],
+        "day_of_week": signal_row["day_of_week"],
+
+        "episode_id": signal_row["episode_id"],
+        "episode_first": signal_row["episode_first"],
     }
 
 
 # ============================================================
-# COSTRUZIONE DATASET TRADE
+# BUILD ALL TRADES
 # ============================================================
 
 def build_trade_dataset(df):
 
-    trades = []
-
     print_separator("COSTRUZIONE DATASET DEI TRADE")
 
-    signal_indices = np.where(
-        df["signal"].isin(["BUY", "SELL"])
-    )[0]
+    signal_indices = df.index[
+        df["signal"] != ""
+    ].tolist()
 
     print(
-        f"Segnali trovati: {len(signal_indices)}"
+        f"Segnali trovati: "
+        f"{len(signal_indices)}"
     )
 
-    for counter, signal_index in enumerate(
-        signal_indices,
-        start=1
-    ):
+    trades = []
 
-        # Il segnale viene generato sulla candela chiusa.
-        # Entriamo all'OPEN della candela successiva.
-        entry_index = signal_index + 1
+    for counter, idx in enumerate(signal_indices, 1):
 
-        if entry_index >= len(df):
-            continue
+        direction = df.at[idx, "signal"]
 
-        row = df.iloc[signal_index]
-
-        direction = row["signal"]
-
-        entry_row = df.iloc[entry_index]
-
-        entry_price = float(
-            entry_row["open"]
+        result = simulate_trade(
+            df,
+            idx,
+            direction,
+            BASE_TP_ATR,
+            BASE_SL_ATR
         )
 
-        atr = float(row["atr"])
+        if result is not None:
+            trades.append(result)
 
-        if not np.isfinite(atr) or atr <= 0:
-            continue
-
-        trade = {
-            "signal_index": signal_index,
-            "entry_index": entry_index,
-            "signal_datetime": row["datetime"],
-            "entry_datetime": entry_row["datetime"],
-            "direction": direction,
-            "entry_price": entry_price,
-            "atr": atr,
-        }
-
-        # ----------------------------------------------------
-        # INDICATORI
-        # ----------------------------------------------------
-
-        feature_columns = [
-            "rsi",
-            "rsi_change_1",
-            "rsi_change_3",
-            "rsi_change_6",
-
-            "ema20",
-            "ema50",
-            "ema_distance",
-            "ema_distance_abs",
-            "ema_distance_atr",
-
-            "ema20_slope_1",
-            "ema20_slope_3",
-            "ema20_slope_6",
-
-            "ema50_slope_1",
-            "ema50_slope_3",
-            "ema50_slope_6",
-
-            "macd",
-            "macd_signal",
-            "macd_hist",
-
-            "macd_change_1",
-            "macd_change_3",
-            "macd_change_6",
-
-            "macd_hist_change_1",
-            "macd_hist_change_3",
-
-            "atr_change_1",
-            "atr_change_3",
-            "atr_relative_24",
-            "atr_relative_48",
-
-            "candle_range",
-            "candle_body",
-            "candle_body_abs",
-            "body_ratio",
-
-            "upper_wick",
-            "lower_wick",
-            "upper_wick_ratio",
-            "lower_wick_ratio",
-            "close_position",
-
-            "momentum_15m",
-            "momentum_30m",
-            "momentum_60m",
-            "momentum_120m",
-
-            "range_15m",
-            "range_30m",
-            "range_60m",
-            "range_120m",
-
-            "bullish_count_3",
-            "bullish_count_6",
-            "bullish_count_12",
-
-            "trend_15",
-            "ema_distance_15",
-            "ema20_slope_15",
-            "ema50_slope_15",
-
-            "trend_1h",
-            "ema_distance_1h",
-            "ema20_slope_1h",
-            "ema50_slope_1h",
-
-            "recent_high_12",
-            "recent_low_12",
-            "distance_high_12_atr",
-            "distance_low_12_atr",
-
-            "recent_high_24",
-            "recent_low_24",
-            "distance_high_24_atr",
-            "distance_low_24_atr",
-
-            "recent_high_48",
-            "recent_low_48",
-            "distance_high_48_atr",
-            "distance_low_48_atr",
-
-            "recent_high_96",
-            "recent_low_96",
-            "distance_high_96_atr",
-            "distance_low_96_atr",
-        ]
-
-        for col in feature_columns:
-
-            if col in row.index:
-                trade[col] = row[col]
-
-        # ----------------------------------------------------
-        # CLASSIFICAZIONI
-        # ----------------------------------------------------
-
-        trade["rsi_bucket"] = classify_rsi(
-            row["rsi"]
-        )
-
-        trade["ema_strength"] = classify_strength(
-            row["ema_distance_atr"]
-        )
-
-        trade["macd_strength"] = classify_strength(
-            abs(row["macd_hist"]) /
-            atr
-        )
-
-        trade["atr_regime"] = classify_atr_relative(
-            row["atr_relative_24"]
-        )
-
-        trade["body_bucket"] = classify_body(
-            row["body_ratio"]
-        )
-
-        # ----------------------------------------------------
-        # CONCORDANZA MULTI-TIMEFRAME
-        # ----------------------------------------------------
-
-        if direction == "BUY":
-
-            trade["trend_15_aligned"] = int(
-                row["trend_15"] == 1
-            )
-
-            trade["trend_1h_aligned"] = int(
-                row["trend_1h"] == 1
-            )
-
-        else:
-
-            trade["trend_15_aligned"] = int(
-                row["trend_15"] == -1
-            )
-
-            trade["trend_1h_aligned"] = int(
-                row["trend_1h"] == -1
-            )
-
-        trade["mtf_aligned"] = int(
-            trade["trend_15_aligned"] == 1 and
-            trade["trend_1h_aligned"] == 1
-        )
-
-        # ----------------------------------------------------
-        # RISULTATO TP/SL
-        # ----------------------------------------------------
-
-        trade.update(
-            evaluate_trade(
-                df,
-                entry_index,
-                direction,
-                entry_price,
-                atr
-            )
-        )
-
-        # ----------------------------------------------------
-        # MFE / MAE / TARGET
-        # ----------------------------------------------------
-
-        trade.update(
-            calculate_forward_metrics(
-                df,
-                entry_index,
-                direction,
-                entry_price,
-                atr
-            )
-        )
-
-        trades.append(trade)
-
-        if counter % 50 == 0:
+        if counter % PRINT_EVERY == 0:
             print(
-                f"Processati {counter}/"
-                f"{len(signal_indices)} segnali..."
+                f"Processati "
+                f"{counter}/{len(signal_indices)} segnali..."
             )
 
-    result = pd.DataFrame(trades)
-
-    if result.empty:
-        raise RuntimeError(
-            "Nessun trade generato."
-        )
-
-    return result
-
-
-# ============================================================
-# SPLIT TEMPORALE
-# ============================================================
-
-def add_dataset_split(trades):
-
-    trades = trades.sort_values(
-        "signal_datetime"
-    ).reset_index(drop=True)
-
-    split_index = int(
-        len(trades) *
-        DEVELOPMENT_RATIO
-    )
-
-    trades["dataset"] = "VERIFICATION"
-
-    trades.loc[
-        :split_index - 1,
-        "dataset"
-    ] = "DEVELOPMENT"
+    trades = pd.DataFrame(trades)
 
     return trades
 
 
 # ============================================================
-# STATISTICHE
+# DATASET NON OVERLAPPING
 # ============================================================
 
-def summarize(df, label):
+def build_non_overlapping(df):
 
-    if df.empty:
+    signal_indices = df.index[
+        df["signal"] != ""
+    ].tolist()
+
+    selected = []
+
+    next_allowed_index = -1
+
+    for idx in signal_indices:
+
+        if idx < next_allowed_index:
+            continue
+
+        selected.append(idx)
+
+        # Simuliamo il trade base
+        direction = df.at[idx, "signal"]
+
+        result = simulate_trade(
+            df,
+            idx,
+            direction,
+            BASE_TP_ATR,
+            BASE_SL_ATR
+        )
+
+        if result is None:
+            continue
+
+        # il prossimo segnale può essere considerato
+        # solo dopo la chiusura del trade
+        next_allowed_index = (
+            idx +
+            result["bars_held"] +
+            2
+        )
+
+    return selected
+
+
+# ============================================================
+# SUMMARY
+# ============================================================
+
+def summarize_trades(trades, dataset_name):
+
+    if trades.empty:
+
         return {
-            "dataset": label,
-            "trades": 0
+            "dataset": dataset_name,
+            "trades": 0,
+            "TP": 0,
+            "SL": 0,
+            "TIMEOUT": 0,
+            "win_rate_pct": np.nan,
+            "avg_R": np.nan,
+            "total_R": 0,
+            "profit_factor": np.nan,
+            "max_drawdown_R": np.nan,
+            "avg_MFE_ATR": np.nan,
+            "avg_MAE_ATR": np.nan,
+            "median_MFE_ATR": np.nan,
+            "median_MAE_ATR": np.nan,
         }
 
+    results = trades["result_R"].tolist()
+
     tp = (
-        df["outcome"] == "TP"
+        trades["outcome"] == "TP"
     ).sum()
 
     sl = (
-        df["outcome"] == "SL"
-    ).sum()
-
-    same = (
-        df["outcome"] ==
-        "SL_AND_TP_SAME_CANDLE"
+        trades["outcome"] == "SL"
     ).sum()
 
     timeout = (
-        df["outcome"] == "TIMEOUT"
+        trades["outcome"] == "TIMEOUT"
     ).sum()
 
-    total = len(df)
-
-    win_rate = (
-        tp / total * 100
-        if total
-        else 0
-    )
-
-    avg_r = df["result_R"].mean()
-
-    total_r = df["result_R"].sum()
-
-    gross_profit = (
-        df.loc[
-            df["result_R"] > 0,
-            "result_R"
-        ].sum()
-    )
-
-    gross_loss = abs(
-        df.loc[
-            df["result_R"] < 0,
-            "result_R"
-        ].sum()
-    )
-
-    profit_factor = (
-        gross_profit /
-        gross_loss
-        if gross_loss > 0
-        else np.nan
-    )
-
-    # --------------------------------------------------------
-    # MAX DRAWDOWN
-    # --------------------------------------------------------
-
-    equity = (
-        df["result_R"]
-        .fillna(0)
-        .cumsum()
-    )
-
-    running_max = equity.cummax()
-
-    drawdown = (
-        running_max -
-        equity
-    )
-
-    max_dd = drawdown.max()
+    wins = tp
 
     return {
-        "dataset": label,
-        "trades": total,
+        "dataset": dataset_name,
+
+        "trades": len(trades),
+
         "TP": int(tp),
         "SL": int(sl),
-        "SL_AND_TP_SAME_CANDLE": int(same),
         "TIMEOUT": int(timeout),
-        "win_rate_pct": win_rate,
-        "avg_R": avg_r,
-        "total_R": total_r,
-        "profit_factor": profit_factor,
-        "max_drawdown_R": max_dd,
-        "avg_MFE_ATR": df["mfe_atr"].mean(),
-        "avg_MAE_ATR": df["mae_atr"].mean(),
-        "median_MFE_ATR": df["mfe_atr"].median(),
-        "median_MAE_ATR": df["mae_atr"].median(),
+
+        "win_rate_pct": (
+            wins /
+            len(trades) *
+            100
+        ),
+
+        "avg_R": trades["result_R"].mean(),
+
+        "total_R": trades["result_R"].sum(),
+
+        "profit_factor": profit_factor_from_R(
+            results
+        ),
+
+        "max_drawdown_R": max_drawdown(
+            results
+        ),
+
+        "avg_MFE_ATR": trades["MFE_ATR"].mean(),
+        "avg_MAE_ATR": trades["MAE_ATR"].mean(),
+
+        "median_MFE_ATR": trades["MFE_ATR"].median(),
+        "median_MAE_ATR": trades["MAE_ATR"].median(),
     }
 
 
-def grouped_analysis(
-    trades,
-    column,
-    min_trades=10
-):
+# ============================================================
+# SUMMARY MULTI DATASET
+# ============================================================
+
+def make_summary_table(trades):
 
     rows = []
 
-    for value, group in trades.groupby(
-        column,
-        dropna=False
-    ):
-
-        if len(group) < min_trades:
-            continue
-
-        summary = summarize(
-            group,
-            str(value)
-        )
-
-        summary["group"] = value
-
-        rows.append(summary)
-
-    if not rows:
+    if trades.empty:
         return pd.DataFrame()
+
+    split_time = trades["signal_time"].quantile(
+        DEVELOPMENT_RATIO
+    )
+
+    development = trades[
+        trades["signal_time"] <= split_time
+    ]
+
+    verification = trades[
+        trades["signal_time"] > split_time
+    ]
+
+    datasets = {
+        "DEVELOPMENT": development,
+        "VERIFICATION": verification,
+        "ALL": trades,
+    }
+
+    for name, subset in datasets.items():
+
+        rows.append(
+            summarize_trades(
+                subset,
+                name
+            )
+        )
 
     return pd.DataFrame(rows)
 
 
 # ============================================================
-# ANALISI TARGET
+# BUY / SELL
 # ============================================================
 
-def target_analysis(trades):
+def analyze_direction(trades):
 
     rows = []
 
-    for dataset_name, dataset in trades.groupby(
-        "dataset"
-    ):
+    split_time = trades["signal_time"].quantile(
+        DEVELOPMENT_RATIO
+    )
 
-        for direction, group in dataset.groupby(
-            "direction"
-        ):
+    datasets = {
+        "DEVELOPMENT": trades[
+            trades["signal_time"] <= split_time
+        ],
+        "VERIFICATION": trades[
+            trades["signal_time"] > split_time
+        ],
+    }
 
-            for target in TP_ATR_LEVELS:
+    for dataset_name, dataset in datasets.items():
 
-                reach_col = (
-                    f"reach_{target:g}atr"
+        for direction in ["BUY", "SELL"]:
+
+            subset = dataset[
+                dataset["direction"] == direction
+            ]
+
+            row = summarize_trades(
+                subset,
+                f"{dataset_name}_{direction}"
+            )
+
+            same = (
+                subset["same_candle_tp_sl"].sum()
+                if not subset.empty
+                else 0
+            )
+
+            row["SL_AND_TP_SAME_CANDLE"] = int(
+                same
+            )
+
+            rows.append(row)
+
+    return pd.DataFrame(rows)
+
+
+# ============================================================
+# GENERIC CONDITION ANALYSIS
+# ============================================================
+
+def condition_stats(
+    trades,
+    condition_name,
+    mask
+):
+
+    subset = trades[mask]
+
+    if len(subset) < 20:
+        return None
+
+    row = summarize_trades(
+        subset,
+        condition_name
+    )
+
+    row["condition"] = condition_name
+
+    return row
+
+
+def analyze_conditions(trades):
+
+    rows = []
+
+    conditions = {}
+
+    # Base
+    conditions["15_ONLY"] = (
+        trades["trend15"].isin(
+            ["BULLISH", "BEARISH"]
+        )
+    )
+
+    conditions["1H_ONLY"] = (
+        trades["trend1h"].isin(
+            ["BULLISH", "BEARISH"]
+        )
+    )
+
+    conditions["15_AND_1H"] = (
+        trades["trend15"].eq(
+            np.where(
+                trades["direction"] == "BUY",
+                "BULLISH",
+                "BEARISH"
+            )
+        )
+        &
+        trades["trend1h"].eq(
+            np.where(
+                trades["direction"] == "BUY",
+                "BULLISH",
+                "BEARISH"
+            )
+        )
+    )
+
+    # Categorical features
+    for col in [
+        "rsi_bucket",
+        "ema_strength",
+        "macd_strength",
+        "atr_regime",
+        "body_bucket",
+        "session",
+        "day_of_week",
+    ]:
+
+        for value in trades[col].dropna().unique():
+
+            conditions[
+                f"{col}={value}"
+            ] = (
+                trades[col] == value
+            )
+
+    # Momentum
+    conditions["momentum_3_positive"] = (
+        trades["momentum_3"] > 0
+    )
+
+    conditions["momentum_3_negative"] = (
+        trades["momentum_3"] < 0
+    )
+
+    conditions["momentum_6_positive"] = (
+        trades["momentum_6"] > 0
+    )
+
+    conditions["momentum_6_negative"] = (
+        trades["momentum_6"] < 0
+    )
+
+    # Strong trend
+    conditions["ema_strong"] = (
+        trades["ema_strength"].isin(
+            ["MEDIUM", "STRONG"]
+        )
+    )
+
+    conditions["ema_weak"] = (
+        trades["ema_strength"].isin(
+            ["VERY_WEAK", "WEAK"]
+        )
+    )
+
+    conditions["macd_strong"] = (
+        trades["macd_strength"] == "STRONG"
+    )
+
+    conditions["macd_weak"] = (
+        trades["macd_strength"] == "WEAK"
+    )
+
+    # Direction-specific trend alignment
+    conditions["direction_15_aligned"] = (
+        (
+            (trades["direction"] == "BUY") &
+            (trades["trend15"] == "BULLISH")
+        )
+        |
+        (
+            (trades["direction"] == "SELL") &
+            (trades["trend15"] == "BEARISH")
+        )
+    )
+
+    conditions["direction_1h_aligned"] = (
+        (
+            (trades["direction"] == "BUY") &
+            (trades["trend1h"] == "BULLISH")
+        )
+        |
+        (
+            (trades["direction"] == "SELL") &
+            (trades["trend1h"] == "BEARISH")
+        )
+    )
+
+    for name, mask in conditions.items():
+
+        row = condition_stats(
+            trades,
+            name,
+            mask
+        )
+
+        if row is not None:
+            rows.append(row)
+
+    # Useful combinations
+    combo_conditions = {
+
+        "EMA_STRONG_AND_MACD_STRONG":
+            conditions["ema_strong"] &
+            conditions["macd_strong"],
+
+        "EMA_WEAK_AND_MACD_WEAK":
+            conditions["ema_weak"] &
+            conditions["macd_weak"],
+
+        "EMA_STRONG_AND_MACD_STRONG_AND_1H_ALIGNED":
+            conditions["ema_strong"] &
+            conditions["macd_strong"] &
+            conditions["direction_1h_aligned"],
+
+        "EMA_STRONG_AND_15_ALIGNED":
+            conditions["ema_strong"] &
+            conditions["direction_15_aligned"],
+
+        "MACD_STRONG_AND_15_ALIGNED":
+            conditions["macd_strong"] &
+            conditions["direction_15_aligned"],
+
+        "HIGH_VOLATILITY_AND_STRONG_EMA":
+            (trades["atr_regime"] == "HIGH") &
+            conditions["ema_strong"],
+
+        "NORMAL_VOLATILITY_AND_STRONG_EMA":
+            (trades["atr_regime"] == "NORMAL") &
+            conditions["ema_strong"],
+
+        "LOW_VOLATILITY_AND_STRONG_EMA":
+            (trades["atr_regime"] == "LOW") &
+            conditions["ema_strong"],
+    }
+
+    for name, mask in combo_conditions.items():
+
+        row = condition_stats(
+            trades,
+            name,
+            mask
+        )
+
+        if row is not None:
+            rows.append(row)
+
+    return pd.DataFrame(rows)
+
+
+# ============================================================
+# FEATURE CORRELATIONS
+# ============================================================
+
+def feature_correlations(trades):
+
+    features = [
+        "rsi",
+        "ema_distance",
+        "macd_hist",
+        "atr_ratio",
+        "body_atr",
+        "momentum_3",
+        "momentum_6",
+        "momentum_12",
+        "momentum_24",
+        "ema20_slope",
+        "ema50_slope",
+        "hour_utc",
+    ]
+
+    rows = []
+
+    for feature in features:
+
+        if feature not in trades.columns:
+            continue
+
+        subset = trades[
+            [feature, "MFE_ATR", "MAE_ATR", "result_R"]
+        ].dropna()
+
+        if len(subset) < 20:
+            continue
+
+        corr_result = subset[
+            feature
+        ].corr(
+            subset["result_R"]
+        )
+
+        corr_mfe = subset[
+            feature
+        ].corr(
+            subset["MFE_ATR"]
+        )
+
+        corr_mae = subset[
+            feature
+        ].corr(
+            subset["MAE_ATR"]
+        )
+
+        rows.append({
+            "feature": feature,
+            "corr_MFE_ATR": corr_mfe,
+            "corr_MAE_ATR": corr_mae,
+            "corr_result_R": corr_result,
+            "abs_corr_result_R": abs(corr_result),
+        })
+
+    return (
+        pd.DataFrame(rows)
+        .sort_values(
+            "abs_corr_result_R",
+            ascending=False
+        )
+        .reset_index(drop=True)
+    )
+
+
+# ============================================================
+# TIME HORIZONS
+# ============================================================
+
+def analyze_time_horizons(trades):
+
+    rows = []
+
+    for direction in ["BUY", "SELL"]:
+
+        subset = trades[
+            trades["direction"] == direction
+        ]
+
+        if subset.empty:
+            continue
+
+        for max_minutes in [
+            15,
+            30,
+            60,
+            120,
+            240,
+            480,
+            720,
+            1440,
+        ]:
+
+            limited = subset[
+                subset["minutes_held"] <= max_minutes
+            ]
+
+            if len(limited) < 20:
+                continue
+
+            row = summarize_trades(
+                limited,
+                f"{direction}_{max_minutes}m"
+            )
+
+            row["direction"] = direction
+            row["max_minutes"] = max_minutes
+
+            rows.append(row)
+
+    return pd.DataFrame(rows)
+
+
+# ============================================================
+# TARGET ANALYSIS
+# ============================================================
+
+def target_analysis(df, trades):
+
+    rows = []
+
+    targets = [
+        0.5,
+        1.0,
+        1.5,
+        2.0,
+        2.5,
+        3.0,
+        3.5,
+        4.0,
+    ]
+
+    split_time = trades["signal_time"].quantile(
+        DEVELOPMENT_RATIO
+    )
+
+    for dataset_name, dataset in [
+        (
+            "DEVELOPMENT",
+            trades[
+                trades["signal_time"] <= split_time
+            ]
+        ),
+        (
+            "VERIFICATION",
+            trades[
+                trades["signal_time"] > split_time
+            ]
+        )
+    ]:
+
+        for direction in ["BUY", "SELL"]:
+
+            subset = dataset[
+                dataset["direction"] == direction
+            ]
+
+            if subset.empty:
+                continue
+
+            for target in targets:
+
+                reached = (
+                    subset["MFE_ATR"] >= target
                 )
 
-                if reach_col not in group.columns:
-                    continue
+                reached_count = reached.sum()
+
+                reached_subset = subset[
+                    reached
+                ]
 
                 rows.append({
                     "dataset": dataset_name,
                     "direction": direction,
                     "target_atr": target,
-                    "trades": len(group),
+                    "trades": len(subset),
                     "reached_count": int(
-                        group[reach_col].sum()
+                        reached_count
                     ),
                     "reach_pct": (
-                        group[reach_col].mean() *
+                        reached_count /
+                        len(subset) *
                         100
                     ),
-                    "avg_minutes_to_target": (
-                        group[
-                            f"minutes_to_{target:g}atr"
-                        ].mean()
-                    ),
-                    "median_minutes_to_target": (
-                        group[
-                            f"minutes_to_{target:g}atr"
-                        ].median()
-                    )
+                    "avg_minutes_to_target": np.nan,
+                    "median_minutes_to_target": np.nan,
                 })
 
     return pd.DataFrame(rows)
 
 
 # ============================================================
-# TP/SL COMBINATIONS
+# TP / SL MATRIX
 # ============================================================
 
-def simulate_tp_sl_matrix(
+def evaluate_matrix(
     df,
-    trades
+    signals,
+    dataset_name,
+    tp_values,
+    sl_values
 ):
 
     rows = []
 
-    for dataset_name, dataset in trades.groupby(
-        "dataset"
-    ):
+    for direction in ["BUY", "SELL"]:
 
-        for direction, group in dataset.groupby(
-            "direction"
+        direction_signals = [
+            x for x in signals
+            if df.at[x, "signal"] == direction
+        ]
+
+        if not direction_signals:
+            continue
+
+        signal_times = df.loc[
+            direction_signals,
+            "datetime"
+        ]
+
+        split_time = df["datetime"].quantile(
+            DEVELOPMENT_RATIO
+        )
+
+        if dataset_name == "DEVELOPMENT":
+            direction_signals = [
+                x for x in direction_signals
+                if df.at[x, "datetime"] <= split_time
+            ]
+
+        elif dataset_name == "VERIFICATION":
+            direction_signals = [
+                x for x in direction_signals
+                if df.at[x, "datetime"] > split_time
+            ]
+
+        for tp_atr, sl_atr in product(
+            tp_values,
+            sl_values
         ):
 
-            for tp_atr in TP_ATR_LEVELS:
+            results = []
 
-                for sl_atr in SL_ATR_LEVELS:
+            wins = 0
+            losses = 0
 
-                    outcomes = []
+            for idx in direction_signals:
 
-                    for _, trade in group.iterrows():
+                result = simulate_trade(
+                    df,
+                    idx,
+                    direction,
+                    tp_atr,
+                    sl_atr
+                )
 
-                        entry_index = int(
-                            trade["entry_index"]
-                        )
+                if result is None:
+                    continue
 
-                        entry = float(
-                            trade["entry_price"]
-                        )
+                results.append(
+                    result["result_R"]
+                )
 
-                        atr = float(
-                            trade["atr"]
-                        )
+                if result["outcome"] == "TP":
+                    wins += 1
 
-                        if not np.isfinite(atr):
-                            continue
+                elif result["outcome"] == "SL":
+                    losses += 1
 
-                        tp_distance = (
-                            tp_atr * atr
-                        )
+            if not results:
+                continue
 
-                        sl_distance = (
-                            sl_atr * atr
-                        )
+            rows.append({
+                "dataset": dataset_name,
+                "direction": direction,
 
-                        if direction == "BUY":
+                "TP_ATR": tp_atr,
+                "SL_ATR": sl_atr,
 
-                            tp_price = (
-                                entry +
-                                tp_distance
-                            )
+                "trades": len(results),
 
-                            sl_price = (
-                                entry -
-                                sl_distance
-                            )
+                "wins": wins,
+                "losses": losses,
 
-                        else:
+                "win_rate_pct": (
+                    wins /
+                    len(results) *
+                    100
+                ),
 
-                            tp_price = (
-                                entry -
-                                tp_distance
-                            )
+                "total_R": sum(results),
 
-                            sl_price = (
-                                entry +
-                                sl_distance
-                            )
+                "avg_R": np.mean(results),
 
-                        end_index = min(
-                            len(df) - 1,
-                            entry_index +
-                            MAX_FORWARD_BARS
-                        )
+                "profit_factor":
+                    profit_factor_from_R(
+                        results
+                    ),
 
-                        future = df.iloc[
-                            entry_index:
-                            end_index + 1
-                        ]
-
-                        outcome = "TIMEOUT"
-
-                        for _, candle in future.iterrows():
-
-                            high = candle["high"]
-                            low = candle["low"]
-
-                            if direction == "BUY":
-
-                                hit_tp = (
-                                    high >= tp_price
-                                )
-
-                                hit_sl = (
-                                    low <= sl_price
-                                )
-
-                            else:
-
-                                hit_tp = (
-                                    low <= tp_price
-                                )
-
-                                hit_sl = (
-                                    high >= sl_price
-                                )
-
-                            if hit_tp and hit_sl:
-
-                                outcome = "SL"
-                                break
-
-                            if hit_tp:
-
-                                outcome = "TP"
-                                break
-
-                            if hit_sl:
-
-                                outcome = "SL"
-                                break
-
-                        if outcome == "TP":
-
-                            result_r = (
-                                tp_atr /
-                                sl_atr
-                            )
-
-                        elif outcome == "SL":
-
-                            result_r = -1
-
-                        else:
-
-                            result_r = 0
-
-                        outcomes.append(
-                            result_r
-                        )
-
-                    if not outcomes:
-                        continue
-
-                    arr = np.array(
-                        outcomes,
-                        dtype=float
-                    )
-
-                    wins = (
-                        arr > 0
-                    ).sum()
-
-                    losses = (
-                        arr < 0
-                    ).sum()
-
-                    gross_profit = arr[
-                        arr > 0
-                    ].sum()
-
-                    gross_loss = abs(
-                        arr[arr < 0].sum()
-                    )
-
-                    pf = (
-                        gross_profit /
-                        gross_loss
-                        if gross_loss > 0
-                        else np.nan
-                    )
-
-                    equity = np.cumsum(arr)
-
-                    running_max = np.maximum.accumulate(
-                        equity
-                    )
-
-                    dd = (
-                        running_max -
-                        equity
-                    )
-
-                    rows.append({
-                        "dataset": dataset_name,
-                        "direction": direction,
-                        "TP_ATR": tp_atr,
-                        "SL_ATR": sl_atr,
-                        "trades": len(arr),
-                        "wins": int(wins),
-                        "losses": int(losses),
-                        "win_rate_pct": (
-                            wins /
-                            len(arr) *
-                            100
-                        ),
-                        "total_R": arr.sum(),
-                        "avg_R": arr.mean(),
-                        "profit_factor": pf,
-                        "max_drawdown_R": dd.max()
-                    })
+                "max_drawdown_R":
+                    max_drawdown(
+                        results
+                    ),
+            })
 
     return pd.DataFrame(rows)
 
 
 # ============================================================
-# ANALISI COMBINAZIONI
+# SAME CANDLE ANALYSIS
 # ============================================================
 
-def combination_analysis(trades):
+def same_candle_analysis(trades):
 
     rows = []
 
-    # Queste sono combinazioni relativamente compatte.
-    # Non facciamo un'esplosione combinatoria enorme.
+    for mode in [
+        "CONSERVATIVE",
+        "OPTIMISTIC",
+        "EXCLUDE"
+    ]:
 
-    conditions = {
-        "rsi_bucket": [
-            "30-40",
-            "40-50",
-            "50-60",
-            "60-65"
-        ],
+        temp = trades.copy()
 
-        "ema_strength": [
-            "WEAK",
-            "MEDIUM",
-            "STRONG"
-        ],
-
-        "macd_strength": [
-            "WEAK",
-            "MEDIUM",
-            "STRONG"
-        ],
-
-        "atr_regime": [
-            "LOW",
-            "NORMAL",
-            "HIGH"
-        ],
-
-        "body_bucket": [
-            "SMALL",
-            "MEDIUM",
-            "LARGE"
-        ]
-    }
-
-    # --------------------------------------------------------
-    # Singoli fattori
-    # --------------------------------------------------------
-
-    for col in conditions:
-
-        for value in conditions[col]:
-
-            subset = trades[
-                trades[col] == value
-            ]
-
-            if len(subset) < 15:
-                continue
-
-            s = summarize(
-                subset,
-                f"{col}={value}"
-            )
-
-            rows.append({
-                "type": "SINGLE",
-                "condition": (
-                    f"{col}={value}"
-                ),
-                **s
-            })
-
-    # --------------------------------------------------------
-    # Coppie
-    # --------------------------------------------------------
-
-    pair_columns = [
-        "rsi_bucket",
-        "ema_strength",
-        "macd_strength",
-        "atr_regime",
-        "body_bucket"
-    ]
-
-    for col_a, col_b in itertools.combinations(
-        pair_columns,
-        2
-    ):
-
-        for value_a in trades[
-            col_a
-        ].dropna().unique():
-
-            for value_b in trades[
-                col_b
-            ].dropna().unique():
-
-                subset = trades[
-                    (trades[col_a] == value_a) &
-                    (trades[col_b] == value_b)
-                ]
-
-                if len(subset) < 15:
-                    continue
-
-                s = summarize(
-                    subset,
-                    f"{col_a}={value_a} & "
-                    f"{col_b}={value_b}"
-                )
-
-                rows.append({
-                    "type": "PAIR",
-                    "condition": (
-                        f"{col_a}={value_a} & "
-                        f"{col_b}={value_b}"
-                    ),
-                    **s
-                })
-
-    # --------------------------------------------------------
-    # Multi-timeframe
-    # --------------------------------------------------------
-
-    mtf_cases = {
-        "15_ONLY": trades[
-            trades["trend_15_aligned"] == 1
-        ],
-
-        "1H_ONLY": trades[
-            trades["trend_1h_aligned"] == 1
-        ],
-
-        "15_AND_1H": trades[
-            (trades["trend_15_aligned"] == 1) &
-            (trades["trend_1h_aligned"] == 1)
-        ],
-
-        "15_AND_1H_NOT_ALIGNED": trades[
-            (trades["trend_15_aligned"] == 1) &
-            (trades["trend_1h_aligned"] == 0)
-        ]
-    }
-
-    for name, subset in mtf_cases.items():
-
-        if len(subset) < 15:
-            continue
-
-        s = summarize(
-            subset,
-            name
+        same = (
+            temp["same_candle_tp_sl"]
         )
 
-        rows.append({
-            "type": "MTF",
-            "condition": name,
-            **s
-        })
+        if mode == "OPTIMISTIC":
+
+            temp.loc[
+                same,
+                "outcome"
+            ] = "TP"
+
+            temp.loc[
+                same,
+                "result_R"
+            ] = (
+                temp.loc[
+                    same,
+                    "tp_atr"
+                ] /
+                temp.loc[
+                    same,
+                    "sl_atr"
+                ]
+            )
+
+        elif mode == "EXCLUDE":
+
+            temp = temp[
+                ~same
+            ]
+
+        row = summarize_trades(
+            temp,
+            mode
+        )
+
+        rows.append(row)
 
     return pd.DataFrame(rows)
 
 
 # ============================================================
-# CORRELAZIONI
+# TIME SPLIT
 # ============================================================
 
-def correlation_analysis(trades):
+def temporal_blocks(trades, n_blocks=6):
 
-    numeric_features = [
-        "rsi",
-        "rsi_change_1",
-        "rsi_change_3",
-        "rsi_change_6",
+    if trades.empty:
+        return pd.DataFrame()
 
-        "ema_distance_atr",
-        "ema20_slope_1",
-        "ema20_slope_3",
-        "ema20_slope_6",
+    ordered = trades.sort_values(
+        "signal_time"
+    ).reset_index(drop=True)
 
-        "ema50_slope_1",
-        "ema50_slope_3",
-        "ema50_slope_6",
-
-        "macd",
-        "macd_hist",
-        "macd_change_1",
-        "macd_change_3",
-        "macd_change_6",
-
-        "atr_relative_24",
-        "atr_relative_48",
-
-        "body_ratio",
-        "upper_wick_ratio",
-        "lower_wick_ratio",
-        "close_position",
-
-        "momentum_15m",
-        "momentum_30m",
-        "momentum_60m",
-        "momentum_120m",
-
-        "bullish_count_3",
-        "bullish_count_6",
-        "bullish_count_12",
-
-        "distance_high_12_atr",
-        "distance_low_12_atr",
-        "distance_high_24_atr",
-        "distance_low_24_atr",
-        "distance_high_48_atr",
-        "distance_low_48_atr",
-        "distance_high_96_atr",
-        "distance_low_96_atr",
-
-        "mfe_atr",
-        "mae_atr"
-    ]
-
-    available = [
-        c for c in numeric_features
-        if c in trades.columns
-    ]
-
-    correlations = []
-
-    for feature in available:
-
-        try:
-
-            corr_mfe = trades[
-                [feature, "mfe_atr"]
-            ].corr().iloc[0, 1]
-
-            corr_mae = trades[
-                [feature, "mae_atr"]
-            ].corr().iloc[0, 1]
-
-            corr_result = trades[
-                [feature, "result_R"]
-            ].corr().iloc[0, 1]
-
-            correlations.append({
-                "feature": feature,
-                "corr_MFE_ATR": corr_mfe,
-                "corr_MAE_ATR": corr_mae,
-                "corr_result_R": corr_result
-            })
-
-        except Exception:
-            pass
-
-    result = pd.DataFrame(
-        correlations
+    blocks = np.array_split(
+        ordered,
+        n_blocks
     )
 
-    if not result.empty:
+    rows = []
 
-        result["abs_corr_result_R"] = (
-            result["corr_result_R"].abs()
+    for i, block in enumerate(blocks, 1):
+
+        row = summarize_trades(
+            block,
+            f"BLOCK_{i}"
         )
 
-        result = result.sort_values(
-            "abs_corr_result_R",
-            ascending=False
+        row["block"] = i
+
+        row["start"] = (
+            block["signal_time"].min()
         )
 
-    return result
+        row["end"] = (
+            block["signal_time"].max()
+        )
+
+        rows.append(row)
+
+    return pd.DataFrame(rows)
 
 
 # ============================================================
-# STAMPA RISULTATI
+# INDEPENDENT SIGNAL DATASETS
 # ============================================================
 
-def print_summary_table(summary_df):
+def build_signal_modes(df):
 
     print_separator(
-        "SUMMARY GENERALE"
+        "COSTRUZIONE MODALITÀ SEGNALI"
     )
 
-    if summary_df.empty:
-        print("Nessun risultato.")
-        return
+    all_indices = df.index[
+        df["signal"] != ""
+    ].tolist()
 
-    cols = [
-        "dataset",
-        "trades",
-        "TP",
-        "SL",
-        "TIMEOUT",
-        "win_rate_pct",
-        "avg_R",
-        "total_R",
-        "profit_factor",
-        "max_drawdown_R",
-        "avg_MFE_ATR",
-        "avg_MAE_ATR"
-    ]
+    episode_first_indices = df.index[
+        (
+            (df["signal"] != "") &
+            df["episode_first"]
+        )
+    ].tolist()
 
-    available = [
-        c for c in cols
-        if c in summary_df.columns
-    ]
+    non_overlapping_indices = (
+        build_non_overlapping(df)
+    )
 
     print(
-        summary_df[
-            available
-        ].to_string(
-            index=False
-        )
+        f"ALL: {len(all_indices)}"
     )
 
+    print(
+        f"FIRST-IN-EPISODE: "
+        f"{len(episode_first_indices)}"
+    )
+
+    print(
+        f"NON-OVERLAPPING: "
+        f"{len(non_overlapping_indices)}"
+    )
+
+    return {
+        "ALL": all_indices,
+        "FIRST_IN_EPISODE": episode_first_indices,
+        "NON_OVERLAPPING": non_overlapping_indices,
+    }
+
+
+# ============================================================
+# BUILD TRADES FOR MODE
+# ============================================================
+
+def trades_from_indices(
+    df,
+    indices,
+    tp_atr=BASE_TP_ATR,
+    sl_atr=BASE_SL_ATR
+):
+
+    results = []
+
+    for idx in indices:
+
+        direction = df.at[
+            idx,
+            "signal"
+        ]
+
+        result = simulate_trade(
+            df,
+            idx,
+            direction,
+            tp_atr,
+            sl_atr
+        )
+
+        if result is not None:
+            results.append(result)
+
+    return pd.DataFrame(results)
+
+
+# ============================================================
+# PRINT TOP ANALYSIS
+# ============================================================
 
 def print_top_analysis(
     df,
@@ -2226,13 +1940,9 @@ def print_top_analysis(
 
     print_separator(title)
 
-    if df.empty:
+    if df is None or df.empty:
         print("Nessun dato disponibile.")
         return
-
-    # --------------------------------------------------------
-    # DATAFRAME DELLE CORRELAZIONI
-    # --------------------------------------------------------
 
     if "feature" in df.columns:
 
@@ -2240,14 +1950,14 @@ def print_top_analysis(
 
         if "abs_corr_result_R" in output.columns:
 
-            output = output.sort_values(
-                "abs_corr_result_R",
-                ascending=False
-            ).head(n)
-
-        else:
-
-            output = output.head(n)
+            output = (
+                output
+                .sort_values(
+                    "abs_corr_result_R",
+                    ascending=False
+                )
+                .head(n)
+            )
 
         print(
             output.to_string(
@@ -2257,91 +1967,49 @@ def print_top_analysis(
 
         return
 
-    # --------------------------------------------------------
-    # DATAFRAME DELLE CONDIZIONI
-    # --------------------------------------------------------
+    if "condition" in df.columns:
 
-    if "trades" not in df.columns:
+        display_cols = [
+            "condition",
+            "trades",
+            "win_rate_pct",
+            "avg_R",
+            "total_R",
+            "profit_factor",
+            "max_drawdown_R",
+            "avg_MFE_ATR",
+            "avg_MAE_ATR",
+        ]
 
-        print(
-            "Formato dataframe non riconosciuto."
+        display_cols = [
+            c for c in display_cols
+            if c in df.columns
+        ]
+
+        output = (
+            df
+            .sort_values(
+                ["trades", "avg_R"],
+                ascending=[False, False]
+            )
+            .head(n)
         )
 
         print(
-            "Colonne disponibili:",
-            list(df.columns)
+            output[
+                display_cols
+            ].to_string(index=False)
         )
 
         return
 
-    display_cols = [
-        "condition",
-        "trades",
-        "win_rate_pct",
-        "avg_R",
-        "total_R",
-        "profit_factor",
-        "max_drawdown_R",
-        "avg_MFE_ATR",
-        "avg_MAE_ATR"
-    ]
-
-    display_cols = [
-        c for c in display_cols
-        if c in df.columns
-    ]
-
-    output = df.sort_values(
-        ["trades", "avg_R"],
-        ascending=[False, False]
-    ).head(n)
-
     print(
-        output[
-            display_cols
-        ].to_string(
-            index=False
-        )
+        "Formato dataframe non riconosciuto."
     )
 
-    print_separator(title)
-
-    if df.empty:
-        print("Nessun gruppo sufficientemente grande.")
-        return
-
-    display_cols = [
-        "condition",
-        "trades",
-        "win_rate_pct",
-        "avg_R",
-        "total_R",
-        "profit_factor",
-        "max_drawdown_R",
-        "avg_MFE_ATR",
-        "avg_MAE_ATR"
-    ]
-
-    display_cols = [
-        c for c in display_cols
-        if c in df.columns
-    ]
-
-    # ATTENZIONE:
-    # non stiamo dichiarando "migliore".
-    # Stampiamo solamente i gruppi con maggiore
-    # risultato statistico per ispezione.
-    output = df.sort_values(
-        ["trades", "avg_R"],
-        ascending=[False, False]
-    ).head(n)
-
     print(
-        output[
-            display_cols
-        ].to_string(
-            index=False
-        )
+        "Colonne disponibili:",
+        list(df.columns)
     )
 
 
@@ -2353,22 +2021,12 @@ def main():
 
     start_time = time.time()
 
-    OUTPUT_DIR.mkdir(
-        parents=True,
-        exist_ok=True
-    )
-
     print_separator(
-        "BACKTEST V2 - XAU/USD"
+        "BACKTEST V3 - XAU/USD"
     )
 
-    print(
-        f"Symbol: {SYMBOL}"
-    )
-
-    print(
-        f"Interval: {INTERVAL}"
-    )
+    print(f"Symbol: {SYMBOL}")
+    print(f"Interval: {INTERVAL}")
 
     print(
         f"TP base: {BASE_TP_ATR} ATR"
@@ -2379,205 +2037,164 @@ def main():
     )
 
     print(
-        f"Development: {DEVELOPMENT_RATIO:.0%}"
+        f"MFE/MAE horizon: "
+        f"{MFE_MAE_HORIZON_BARS} barre"
+    )
+
+    print(
+        f"Development: "
+        f"{DEVELOPMENT_RATIO * 100:.0f}%"
     )
 
     print(
         f"Verification: "
-        f"{1 - DEVELOPMENT_RATIO:.0%}"
+        f"{(1 - DEVELOPMENT_RATIO) * 100:.0f}%"
     )
 
     # --------------------------------------------------------
-    # 1. DOWNLOAD
+    # DOWNLOAD
     # --------------------------------------------------------
 
     df = download_history()
 
-    print_separator(
-        "DATI STORICI"
-    )
+    # --------------------------------------------------------
+    # INDICATORS
+    # --------------------------------------------------------
 
-    print(
-        f"Candele totali: {len(df)}"
-    )
+    df = calculate_indicators(df)
 
-    print(
-        f"Periodo: "
-        f"{df['datetime'].min()} -> "
-        f"{df['datetime'].max()}"
-    )
+    df = add_time_features(df)
 
-    # Salva dati grezzi
+    df = build_higher_timeframes(df)
+
+    # --------------------------------------------------------
+    # SIGNALS
+    # --------------------------------------------------------
+
+    df = generate_signals(df)
+
+    df = classify_signal_episodes(df)
+
+    # --------------------------------------------------------
+    # RAW DATA SAVE
+    # --------------------------------------------------------
+
     df.to_csv(
-        OUTPUT_DIR /
-        "raw_5m_data.csv",
-        index=False
-    )
-
-    # --------------------------------------------------------
-    # 2. INDICATORI
-    # --------------------------------------------------------
-
-    print_separator(
-        "CALCOLO INDICATORI"
-    )
-
-    df = add_indicators(df)
-
-    # --------------------------------------------------------
-    # 3. TIMEFRAME SUPERIORI
-    # --------------------------------------------------------
-
-    print_separator(
-        "COSTRUZIONE 15M + 1H"
-    )
-
-    df = build_higher_timeframe_context(
-        df
-    )
-
-    # --------------------------------------------------------
-    # 4. SEGNALI
-    # --------------------------------------------------------
-
-    print_separator(
-        "GENERAZIONE SEGNALI BASE"
-    )
-
-    df = generate_base_signals(df)
-
-    signal_count = (
-        df["signal"]
-        .isin(["BUY", "SELL"])
-        .sum()
-    )
-
-    print(
-        f"BUY/SELL totali: {signal_count}"
-    )
-
-    print(
-        "BUY:",
-        (df["signal"] == "BUY").sum()
-    )
-
-    print(
-        "SELL:",
-        (df["signal"] == "SELL").sum()
-    )
-
-    # --------------------------------------------------------
-    # 5. TRADE DATASET
-    # --------------------------------------------------------
-
-    trades = build_trade_dataset(
-        df
-    )
-
-    # --------------------------------------------------------
-    # 6. SPLIT
-    # --------------------------------------------------------
-
-    trades = add_dataset_split(
-        trades
-    )
-
-    # --------------------------------------------------------
-    # 7. SALVA DATASET COMPLETO
-    # --------------------------------------------------------
-
-    trades.to_csv(
-        OUTPUT_DIR /
-        "diagnostic_v2_all_trades.csv",
-        index=False
-    )
-
-    # --------------------------------------------------------
-    # 8. DEVELOPMENT / VERIFICATION
-    # --------------------------------------------------------
-
-    development = trades[
-        trades["dataset"] ==
-        "DEVELOPMENT"
-    ].copy()
-
-    verification = trades[
-        trades["dataset"] ==
-        "VERIFICATION"
-    ].copy()
-
-    development.to_csv(
-        OUTPUT_DIR /
-        "diagnostic_v2_development.csv",
-        index=False
-    )
-
-    verification.to_csv(
-        OUTPUT_DIR /
-        "diagnostic_v2_verification.csv",
-        index=False
-    )
-
-    # --------------------------------------------------------
-    # 9. SUMMARY
-    # --------------------------------------------------------
-
-    summary = pd.DataFrame([
-        summarize(
-            development,
-            "DEVELOPMENT"
+        os.path.join(
+            OUTPUT_DIR,
+            "raw_5m_data_v3.csv"
         ),
+        index=False
+    )
 
-        summarize(
-            verification,
-            "VERIFICATION"
+    # --------------------------------------------------------
+    # SIGNAL MODES
+    # --------------------------------------------------------
+
+    modes = build_signal_modes(df)
+
+    # --------------------------------------------------------
+    # ALL BASE TRADES
+    # --------------------------------------------------------
+
+    print_separator(
+        "COSTRUZIONE TRADE BASE"
+    )
+
+    all_trades = trades_from_indices(
+        df,
+        modes["ALL"]
+    )
+
+    episode_trades = trades_from_indices(
+        df,
+        modes["FIRST_IN_EPISODE"]
+    )
+
+    non_overlap_trades = trades_from_indices(
+        df,
+        modes["NON_OVERLAPPING"]
+    )
+
+    # --------------------------------------------------------
+    # MODE SUMMARY
+    # --------------------------------------------------------
+
+    mode_rows = []
+
+    for name, dataset in [
+        ("ALL", all_trades),
+        (
+            "FIRST_IN_EPISODE",
+            episode_trades
         ),
+        (
+            "NON_OVERLAPPING",
+            non_overlap_trades
+        ),
+    ]:
 
-        summarize(
-            trades,
-            "ALL"
+        row = summarize_trades(
+            dataset,
+            name
         )
-    ])
+
+        mode_rows.append(row)
+
+    mode_summary = pd.DataFrame(
+        mode_rows
+    )
+
+    print_separator(
+        "CONFRONTO MODALITÀ SEGNALI"
+    )
+
+    print(
+        mode_summary.to_string(
+            index=False
+        )
+    )
+
+    mode_summary.to_csv(
+        os.path.join(
+            OUTPUT_DIR,
+            "signal_modes_summary.csv"
+        ),
+        index=False
+    )
+
+    # --------------------------------------------------------
+    # BASE SUMMARY
+    # --------------------------------------------------------
+
+    summary = make_summary_table(
+        all_trades
+    )
+
+    print_separator(
+        "SUMMARY GENERALE - ALL SIGNALS"
+    )
+
+    print(
+        summary.to_string(
+            index=False
+        )
+    )
 
     summary.to_csv(
-        OUTPUT_DIR /
-        "summary.csv",
+        os.path.join(
+            OUTPUT_DIR,
+            "summary_v3.csv"
+        ),
         index=False
     )
 
-    print_summary_table(
-        summary
-    )
-
     # --------------------------------------------------------
-    # 10. BUY / SELL
+    # BUY / SELL
     # --------------------------------------------------------
 
-    direction_rows = []
-
-    for dataset_name, dataset in trades.groupby(
-        "dataset"
-    ):
-
-        for direction, group in dataset.groupby(
-            "direction"
-        ):
-
-            s = summarize(
-                group,
-                f"{dataset_name}_{direction}"
-            )
-
-            direction_rows.append(s)
-
-    direction_df = pd.DataFrame(
-        direction_rows
-    )
-
-    direction_df.to_csv(
-        OUTPUT_DIR /
-        "by_direction.csv",
-        index=False
+    direction = analyze_direction(
+        all_trades
     )
 
     print_separator(
@@ -2585,209 +2202,94 @@ def main():
     )
 
     print(
-        direction_df.to_string(
+        direction.to_string(
             index=False
         )
     )
 
-    # --------------------------------------------------------
-    # 11. RSI
-    # --------------------------------------------------------
-
-    rsi_df = grouped_analysis(
-        trades,
-        "rsi_bucket"
-    )
-
-    rsi_df.to_csv(
-        OUTPUT_DIR /
-        "by_rsi.csv",
+    direction.to_csv(
+        os.path.join(
+            OUTPUT_DIR,
+            "by_direction_v3.csv"
+        ),
         index=False
     )
 
     # --------------------------------------------------------
-    # 12. EMA STRENGTH
+    # CONDITIONS
     # --------------------------------------------------------
 
-    ema_df = grouped_analysis(
-        trades,
-        "ema_strength"
+    conditions = analyze_conditions(
+        all_trades
     )
-
-    ema_df.to_csv(
-        OUTPUT_DIR /
-        "by_ema_strength.csv",
-        index=False
-    )
-
-    # --------------------------------------------------------
-    # 13. MACD STRENGTH
-    # --------------------------------------------------------
-
-    macd_df = grouped_analysis(
-        trades,
-        "macd_strength"
-    )
-
-    macd_df.to_csv(
-        OUTPUT_DIR /
-        "by_macd_strength.csv",
-        index=False
-    )
-
-    # --------------------------------------------------------
-    # 14. ATR REGIME
-    # --------------------------------------------------------
-
-    atr_df = grouped_analysis(
-        trades,
-        "atr_regime"
-    )
-
-    atr_df.to_csv(
-        OUTPUT_DIR /
-        "by_atr_regime.csv",
-        index=False
-    )
-
-    # --------------------------------------------------------
-    # 15. BODY
-    # --------------------------------------------------------
-
-    body_df = grouped_analysis(
-        trades,
-        "body_bucket"
-    )
-
-    body_df.to_csv(
-        OUTPUT_DIR /
-        "by_body.csv",
-        index=False
-    )
-
-    # --------------------------------------------------------
-    # 16. TARGET ANALYSIS
-    # --------------------------------------------------------
-
-    targets_df = target_analysis(
-        trades
-    )
-
-    targets_df.to_csv(
-        OUTPUT_DIR /
-        "target_analysis.csv",
-        index=False
-    )
-
-    # --------------------------------------------------------
-    # 17. TP/SL MATRIX
-    # --------------------------------------------------------
-
-    matrix_df = simulate_tp_sl_matrix(
-        df,
-        trades
-    )
-
-    matrix_df.to_csv(
-        OUTPUT_DIR /
-        "tp_sl_matrix.csv",
-        index=False
-    )
-
-    # --------------------------------------------------------
-    # 18. COMBINATIONS
-    # --------------------------------------------------------
-
-    combinations_df = combination_analysis(
-        trades
-    )
-
-    combinations_df.to_csv(
-        OUTPUT_DIR /
-        "condition_combinations.csv",
-        index=False
-    )
-
-    # --------------------------------------------------------
-    # 19. CORRELAZIONI
-    # --------------------------------------------------------
-
-    correlations_df = correlation_analysis(
-        trades
-    )
-
-    correlations_df.to_csv(
-        OUTPUT_DIR /
-        "feature_correlations.csv",
-        index=False
-    )
-
-    # --------------------------------------------------------
-    # 20. ANALISI ORIZZONTI
-    # --------------------------------------------------------
-
-    horizon_rows = []
-
-    for dataset_name, dataset in trades.groupby(
-        "dataset"
-    ):
-
-        for horizon_name in HORIZONS:
-
-            mfe_col = (
-                f"mfe_{horizon_name}_atr"
-            )
-
-            mae_col = (
-                f"mae_{horizon_name}_atr"
-            )
-
-            if mfe_col not in dataset.columns:
-                continue
-
-            horizon_rows.append({
-                "dataset": dataset_name,
-                "horizon": horizon_name,
-                "avg_MFE_ATR": dataset[
-                    mfe_col
-                ].mean(),
-                "median_MFE_ATR": dataset[
-                    mfe_col
-                ].median(),
-                "avg_MAE_ATR": dataset[
-                    mae_col
-                ].mean(),
-                "median_MAE_ATR": dataset[
-                    mae_col
-                ].median()
-            })
-
-    horizons_df = pd.DataFrame(
-        horizon_rows
-    )
-
-    horizons_df.to_csv(
-        OUTPUT_DIR /
-        "time_horizons.csv",
-        index=False
-    )
-
-    # --------------------------------------------------------
-    # 21. STAMPA ANALISI
-    # --------------------------------------------------------
 
     print_top_analysis(
-        combinations_df,
+        conditions,
         "CONDIZIONI / COMBINAZIONI"
     )
 
-    print_top_analysis(
-        correlations_df.rename(
-            columns={
-                "feature": "condition"
-            }
+    conditions.to_csv(
+        os.path.join(
+            OUTPUT_DIR,
+            "condition_combinations_v3.csv"
         ),
+        index=False
+    )
+
+    # --------------------------------------------------------
+    # CORRELATIONS
+    # --------------------------------------------------------
+
+    correlations = feature_correlations(
+        all_trades
+    )
+
+    print_top_analysis(
+        correlations,
         "FEATURE CON MAGGIORE CORRELAZIONE"
+    )
+
+    correlations.to_csv(
+        os.path.join(
+            OUTPUT_DIR,
+            "feature_correlations_v3.csv"
+        ),
+        index=False
+    )
+
+    # --------------------------------------------------------
+    # TIME HORIZONS
+    # --------------------------------------------------------
+
+    horizons = analyze_time_horizons(
+        all_trades
+    )
+
+    print_separator(
+        "TIME HORIZONS"
+    )
+
+    print(
+        horizons.to_string(
+            index=False
+        )
+    )
+
+    horizons.to_csv(
+        os.path.join(
+            OUTPUT_DIR,
+            "time_horizons_v3.csv"
+        ),
+        index=False
+    )
+
+    # --------------------------------------------------------
+    # TARGET ANALYSIS
+    # --------------------------------------------------------
+
+    targets = target_analysis(
+        df,
+        all_trades
     )
 
     print_separator(
@@ -2795,9 +2297,67 @@ def main():
     )
 
     print(
-        targets_df.to_string(
+        targets.to_string(
             index=False
         )
+    )
+
+    targets.to_csv(
+        os.path.join(
+            OUTPUT_DIR,
+            "target_analysis_v3.csv"
+        ),
+        index=False
+    )
+
+    # --------------------------------------------------------
+    # TP / SL MATRIX
+    # --------------------------------------------------------
+
+    tp_values = [
+        0.5,
+        1.0,
+        1.5,
+        2.0,
+        2.5,
+        3.0,
+        3.5,
+        4.0,
+    ]
+
+    sl_values = [
+        0.5,
+        1.0,
+        1.5,
+        2.0,
+        2.5,
+        3.0,
+    ]
+
+    all_signal_indices = modes["ALL"]
+
+    matrix_dev = evaluate_matrix(
+        df,
+        all_signal_indices,
+        "DEVELOPMENT",
+        tp_values,
+        sl_values
+    )
+
+    matrix_ver = evaluate_matrix(
+        df,
+        all_signal_indices,
+        "VERIFICATION",
+        tp_values,
+        sl_values
+    )
+
+    matrix = pd.concat(
+        [
+            matrix_dev,
+            matrix_ver
+        ],
+        ignore_index=True
     )
 
     print_separator(
@@ -2805,18 +2365,408 @@ def main():
     )
 
     print(
-        matrix_df.to_string(
+        matrix.to_string(
             index=False
         )
     )
 
-    print_separator(
-        "FINE BACKTEST"
+    matrix.to_csv(
+        os.path.join(
+            OUTPUT_DIR,
+            "tp_sl_matrix_v3.csv"
+        ),
+        index=False
     )
 
-    elapsed = (
-        time.time() -
-        start_time
+    # --------------------------------------------------------
+    # TP / SL FOR INDEPENDENT MODES
+    # --------------------------------------------------------
+
+    mode_matrix_rows = []
+
+    for mode_name, mode_indices in modes.items():
+
+        if mode_name == "ALL":
+            continue
+
+        matrix_mode = evaluate_matrix(
+            df,
+            mode_indices,
+            "ALL",
+            tp_values,
+            sl_values
+        )
+
+        if not matrix_mode.empty:
+
+            matrix_mode.insert(
+                0,
+                "signal_mode",
+                mode_name
+            )
+
+            mode_matrix_rows.append(
+                matrix_mode
+            )
+
+    if mode_matrix_rows:
+
+        independent_matrix = pd.concat(
+            mode_matrix_rows,
+            ignore_index=True
+        )
+
+    else:
+
+        independent_matrix = pd.DataFrame()
+
+    independent_matrix.to_csv(
+        os.path.join(
+            OUTPUT_DIR,
+            "tp_sl_matrix_independent_v3.csv"
+        ),
+        index=False
+    )
+
+    # --------------------------------------------------------
+    # SAME CANDLE
+    # --------------------------------------------------------
+
+    same_candle = same_candle_analysis(
+        all_trades
+    )
+
+    print_separator(
+        "SAME CANDLE TP + SL"
+    )
+
+    print(
+        same_candle.to_string(
+            index=False
+        )
+    )
+
+    same_candle.to_csv(
+        os.path.join(
+            OUTPUT_DIR,
+            "same_candle_analysis_v3.csv"
+        ),
+        index=False
+    )
+
+    # --------------------------------------------------------
+    # TEMPORAL BLOCKS
+    # --------------------------------------------------------
+
+    blocks = temporal_blocks(
+        all_trades,
+        n_blocks=6
+    )
+
+    print_separator(
+        "STABILITÀ TEMPORALE - 6 BLOCCHI"
+    )
+
+    print(
+        blocks.to_string(
+            index=False
+        )
+    )
+
+    blocks.to_csv(
+        os.path.join(
+            OUTPUT_DIR,
+            "temporal_blocks_v3.csv"
+        ),
+        index=False
+    )
+
+    # --------------------------------------------------------
+    # MODE TEMPORAL BLOCKS
+    # --------------------------------------------------------
+
+    mode_block_rows = []
+
+    for mode_name, dataset in [
+        ("ALL", all_trades),
+        (
+            "FIRST_IN_EPISODE",
+            episode_trades
+        ),
+        (
+            "NON_OVERLAPPING",
+            non_overlap_trades
+        )
+    ]:
+
+        block_df = temporal_blocks(
+            dataset,
+            n_blocks=6
+        )
+
+        if not block_df.empty:
+
+            block_df.insert(
+                0,
+                "signal_mode",
+                mode_name
+            )
+
+            mode_block_rows.append(
+                block_df
+            )
+
+    if mode_block_rows:
+
+        mode_blocks = pd.concat(
+            mode_block_rows,
+            ignore_index=True
+        )
+
+    else:
+
+        mode_blocks = pd.DataFrame()
+
+    mode_blocks.to_csv(
+        os.path.join(
+            OUTPUT_DIR,
+            "signal_mode_temporal_blocks_v3.csv"
+        ),
+        index=False
+    )
+
+    # --------------------------------------------------------
+    # DETAILED TRADE DATA
+    # --------------------------------------------------------
+
+    all_trades.to_csv(
+        os.path.join(
+            OUTPUT_DIR,
+            "diagnostic_v3_all_trades.csv"
+        ),
+        index=False
+    )
+
+    episode_trades.to_csv(
+        os.path.join(
+            OUTPUT_DIR,
+            "diagnostic_v3_first_episode.csv"
+        ),
+        index=False
+    )
+
+    non_overlap_trades.to_csv(
+        os.path.join(
+            OUTPUT_DIR,
+            "diagnostic_v3_non_overlapping.csv"
+        ),
+        index=False
+    )
+
+    # --------------------------------------------------------
+    # DEVELOPMENT / VERIFICATION FILES
+    # --------------------------------------------------------
+
+    split_time = all_trades[
+        "signal_time"
+    ].quantile(
+        DEVELOPMENT_RATIO
+    )
+
+    development = all_trades[
+        all_trades["signal_time"] <= split_time
+    ]
+
+    verification = all_trades[
+        all_trades["signal_time"] > split_time
+    ]
+
+    development.to_csv(
+        os.path.join(
+            OUTPUT_DIR,
+            "diagnostic_v3_development.csv"
+        ),
+        index=False
+    )
+
+    verification.to_csv(
+        os.path.join(
+            OUTPUT_DIR,
+            "diagnostic_v3_verification.csv"
+        ),
+        index=False
+    )
+
+    # --------------------------------------------------------
+    # QUICK DEVELOPMENT / VERIFICATION CONDITIONS
+    # --------------------------------------------------------
+
+    dev_conditions = analyze_conditions(
+        development
+    )
+
+    ver_conditions = analyze_conditions(
+        verification
+    )
+
+    dev_conditions.to_csv(
+        os.path.join(
+            OUTPUT_DIR,
+            "conditions_development_v3.csv"
+        ),
+        index=False
+    )
+
+    ver_conditions.to_csv(
+        os.path.join(
+            OUTPUT_DIR,
+            "conditions_verification_v3.csv"
+        ),
+        index=False
+    )
+
+    # --------------------------------------------------------
+    # DIRECTION × REGIME
+    # --------------------------------------------------------
+
+    regime_rows = []
+
+    for direction_name in [
+        "BUY",
+        "SELL"
+    ]:
+
+        for regime_col in [
+            "atr_regime",
+            "ema_strength",
+            "macd_strength",
+            "body_bucket",
+            "rsi_bucket",
+            "session",
+            "day_of_week",
+        ]:
+
+            for value in all_trades[
+                regime_col
+            ].dropna().unique():
+
+                subset = all_trades[
+                    (
+                        all_trades["direction"] ==
+                        direction_name
+                    )
+                    &
+                    (
+                        all_trades[regime_col] ==
+                        value
+                    )
+                ]
+
+                if len(subset) < 20:
+                    continue
+
+                row = summarize_trades(
+                    subset,
+                    f"{direction_name}_{regime_col}_{value}"
+                )
+
+                row["direction"] = direction_name
+                row["feature"] = regime_col
+                row["value"] = value
+
+                regime_rows.append(row)
+
+    direction_regimes = pd.DataFrame(
+        regime_rows
+    )
+
+    direction_regimes.to_csv(
+        os.path.join(
+            OUTPUT_DIR,
+            "direction_regimes_v3.csv"
+        ),
+        index=False
+    )
+
+    # --------------------------------------------------------
+    # FINAL DIAGNOSTICS
+    # --------------------------------------------------------
+
+    print_separator(
+        "DIAGNOSTICA FINALE"
+    )
+
+    print(
+        "Segnali totali:",
+        len(modes["ALL"])
+    )
+
+    print(
+        "Primo segnale per episodio:",
+        len(modes["FIRST_IN_EPISODE"])
+    )
+
+    print(
+        "Segnali non sovrapposti:",
+        len(modes["NON_OVERLAPPING"])
+    )
+
+    print(
+        "Trade ALL:",
+        len(all_trades)
+    )
+
+    print(
+        "Trade FIRST-IN-EPISODE:",
+        len(episode_trades)
+    )
+
+    print(
+        "Trade NON-OVERLAPPING:",
+        len(non_overlap_trades)
+    )
+
+    print(
+        "Split development:",
+        split_time
+    )
+
+    print(
+        "MFE mediana ALL:",
+        round(
+            all_trades["MFE_ATR"].median(),
+            3
+        )
+    )
+
+    print(
+        "MAE mediana ALL:",
+        round(
+            all_trades["MAE_ATR"].median(),
+            3
+        )
+    )
+
+    # --------------------------------------------------------
+    # FILE LIST
+    # --------------------------------------------------------
+
+    print_separator(
+        "FILE RISULTATO"
+    )
+
+    for filename in sorted(
+        os.listdir(OUTPUT_DIR)
+    ):
+
+        print(
+            f" - {filename}"
+        )
+
+    elapsed = time.time() - start_time
+
+    print_separator(
+        "FINE BACKTEST V3"
     )
 
     print(
@@ -2826,19 +2776,8 @@ def main():
 
     print(
         f"Risultati salvati in: "
-        f"{OUTPUT_DIR.resolve()}"
+        f"{os.path.abspath(OUTPUT_DIR)}"
     )
-
-    print(
-        "\nFile principali:"
-    )
-
-    for file in sorted(
-        OUTPUT_DIR.glob("*.csv")
-    ):
-        print(
-            f" - {file.name}"
-        )
 
 
 if __name__ == "__main__":
