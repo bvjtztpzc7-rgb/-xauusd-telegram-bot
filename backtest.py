@@ -11,7 +11,7 @@ warnings.filterwarnings("ignore")
 
 
 # ============================================================
-# CONFIGURAZIONE
+# CONFIGURAZIONE V5
 # ============================================================
 
 SYMBOL = "XAU/USD"
@@ -20,10 +20,15 @@ INTERVAL = "5min"
 API_KEY = os.getenv("TWELVE_DATA_API_KEY")
 
 if not API_KEY:
-    raise RuntimeError("TWELVE_DATA_API_KEY non configurato")
+    raise RuntimeError(
+        "TWELVE_DATA_API_KEY non configurato"
+    )
 
-OUTPUT_DIR = "backtest_results_v4"
-os.makedirs(OUTPUT_DIR, exist_ok=True)
+OUTPUT_DIR = "backtest_results_v5"
+os.makedirs(
+    OUTPUT_DIR,
+    exist_ok=True
+)
 
 # ------------------------------------------------------------
 # STORICO
@@ -51,25 +56,33 @@ DEFAULT_SL_ATR = 1.5
 # ------------------------------------------------------------
 
 TP_VALUES = [
-    0.5, 1.0, 1.5, 2.0,
-    2.5, 3.0, 3.5, 4.0
+    0.5,
+    1.0,
+    1.5,
+    2.0,
+    2.5,
+    3.0,
+    3.5,
+    4.0
 ]
 
 SL_VALUES = [
-    0.5, 1.0, 1.5,
-    2.0, 2.5, 3.0
+    0.5,
+    1.0,
+    1.5,
+    2.0,
+    2.5,
+    3.0
 ]
 
 # ------------------------------------------------------------
-# MODALITÀ SAME CANDLE
+# SAME CANDLE
 # ------------------------------------------------------------
 
 SAME_CANDLE_MODE = "CONSERVATIVE"
 
 # ------------------------------------------------------------
-# COSTI SIMULATI
-#
-# Lasciati a 0 per non inventare spread/commissioni.
+# COSTI
 # ------------------------------------------------------------
 
 COST_R = 0.0
@@ -80,8 +93,10 @@ COST_R = 0.0
 # ============================================================
 
 def safe_float(value, default=np.nan):
+
     try:
         return float(value)
+
     except Exception:
         return default
 
@@ -120,9 +135,9 @@ def ensure_dataframe(obj):
 def print_separator(title):
 
     print()
-    print("=" * 90)
+    print("=" * 100)
     print(title)
-    print("=" * 90)
+    print("=" * 100)
 
 
 def profit_factor(results):
@@ -176,7 +191,10 @@ def max_drawdown(results):
         return 0.0
 
     equity = np.concatenate(
-        [[0.0], np.cumsum(values)]
+        [
+            [0.0],
+            np.cumsum(values)
+        ]
     )
 
     peaks = np.maximum.accumulate(
@@ -197,16 +215,22 @@ def print_table(title, data):
     data = ensure_dataframe(data)
 
     if data.empty:
+
         print("Nessun dato.")
+
         return
 
     with pd.option_context(
-        "display.max_rows", 200,
-        "display.max_columns", 60,
-        "display.width", 240,
+        "display.max_rows",
+        200,
+        "display.max_columns",
+        80,
+        "display.width",
+        260,
         "display.float_format",
         lambda x: f"{x:.4f}"
     ):
+
         print(
             data.to_string(
                 index=False
@@ -235,12 +259,15 @@ def download_block(end_date=None):
     }
 
     if end_date is not None:
+
         params["end_date"] = end_date
 
     print(
         "Download:",
         {
-            k: "***" if k == "apikey" else v
+            k: "***"
+            if k == "apikey"
+            else v
             for k, v in params.items()
         }
     )
@@ -269,6 +296,7 @@ def download_block(end_date=None):
     )
 
     if df.empty:
+
         raise RuntimeError(
             "Blocco storico vuoto."
         )
@@ -282,11 +310,13 @@ def download_block(end_date=None):
     ]
 
     missing = [
-        c for c in required
+        c
+        for c in required
         if c not in df.columns
     ]
 
     if missing:
+
         raise RuntimeError(
             f"Colonne mancanti: {missing}"
         )
@@ -302,6 +332,7 @@ def download_block(end_date=None):
         "low",
         "close"
     ]:
+
         df[col] = pd.to_numeric(
             df[col],
             errors="coerce"
@@ -342,7 +373,9 @@ def download_history():
 
     time.sleep(1)
 
-    oldest = block1["datetime"].min()
+    oldest = block1[
+        "datetime"
+    ].min()
 
     end_date = (
         oldest -
@@ -356,7 +389,10 @@ def download_history():
     )
 
     df = pd.concat(
-        [block1, block2],
+        [
+            block1,
+            block2
+        ],
         ignore_index=True
     )
 
@@ -548,7 +584,9 @@ def calculate_indicators(df):
             tr3
         ],
         axis=1
-    ).max(axis=1)
+    ).max(
+        axis=1
+    )
 
     df["atr"] = (
         true_range
@@ -713,15 +751,6 @@ def add_higher_timeframes(df):
         .mean()
     )
 
-    # --------------------------------------------------------
-    # IMPORTANTISSIMO:
-    # il valore disponibile sulla candela 5m
-    # deve provenire dall'ULTIMA candela 15m
-    # COMPLETAMENTE CHIUSA.
-    #
-    # Per questo spostiamo di una barra.
-    # --------------------------------------------------------
-
     tf15["bullish_15"] = (
         tf15["ema20_15"] >
         tf15["ema50_15"]
@@ -732,6 +761,7 @@ def add_higher_timeframes(df):
         tf15["ema50_15"]
     )
 
+    # Solo candela 15m completamente chiusa
     tf15 = tf15[
         [
             "ema20_15",
@@ -793,6 +823,7 @@ def add_higher_timeframes(df):
         tf1h["ema50_1h"]
     )
 
+    # Solo candela 1H completamente chiusa
     tf1h = tf1h[
         [
             "ema20_1h",
@@ -822,7 +853,7 @@ def add_higher_timeframes(df):
 
 
 # ============================================================
-# SIGNALI
+# GENERAZIONE SEGNALI
 # ============================================================
 
 def generate_signals(df):
@@ -854,7 +885,12 @@ def generate_signals(df):
     )
 
     # --------------------------------------------------------
-    # STRATEGIA BASE
+    # STRATEGIA BASE V5
+    #
+    # ATTENZIONE:
+    # Questa parte viene mantenuta volutamente uguale
+    # alla strategia che stiamo diagnosticando.
+    # Prima misuriamo i risultati, poi cambiamo i filtri.
     # --------------------------------------------------------
 
     buy = (
@@ -975,19 +1011,11 @@ def simulate_trade(
     horizon=HORIZON_BARS,
     same_candle_mode=SAME_CANDLE_MODE
 ):
-    """
-    CORREZIONE FONDAMENTALE V4
 
-    Il segnale viene generato sulla candela N.
-
-    NON entriamo al close della candela N.
-
-    L'ingresso avviene all'OPEN della candela N+1.
-
-    In questo modo il backtest non presume di poter
-    conoscere il close e contemporaneamente eseguire
-    esattamente a quel prezzo.
-    """
+    # --------------------------------------------------------
+    # Il segnale nasce sulla candela N.
+    # L'ingresso avviene all'OPEN di N+1.
+    # --------------------------------------------------------
 
     if signal_index >= len(df) - 1:
         return None
@@ -1001,10 +1029,6 @@ def simulate_trade(
         if signal_row["signal"] == 1
         else "SELL"
     )
-
-    # --------------------------------------------------------
-    # ENTRY = OPEN DELLA CANDELA SUCCESSIVA
-    # --------------------------------------------------------
 
     entry_index = (
         signal_index + 1
@@ -1062,6 +1086,7 @@ def simulate_trade(
     mae = 0.0
 
     outcome = "TIMEOUT"
+
     exit_index = end_index
 
     exit_price = safe_float(
@@ -1144,16 +1169,20 @@ def simulate_trade(
         )
 
         if (
-            np.isnan(minutes_to_target)
-            and favorable >= tp_atr
+            np.isnan(
+                minutes_to_target
+            )
+            and
+            favorable >= tp_atr
         ):
 
             minutes_to_target = (
-                j - entry_index
+                j -
+                entry_index
             ) * 5
 
         # ----------------------------------------------------
-        # TP E SL NELLA STESSA CANDELA
+        # TP + SL NELLA STESSA CANDELA
         # ----------------------------------------------------
 
         if tp_hit and sl_hit:
@@ -1166,7 +1195,9 @@ def simulate_trade(
             ):
 
                 outcome = "SL"
+
                 exit_index = j
+
                 exit_price = sl_price
 
             elif (
@@ -1175,13 +1206,17 @@ def simulate_trade(
             ):
 
                 outcome = "TP"
+
                 exit_index = j
+
                 exit_price = tp_price
 
             else:
 
                 outcome = "EXCLUDE"
+
                 exit_index = j
+
                 exit_price = np.nan
 
             break
@@ -1193,7 +1228,9 @@ def simulate_trade(
         if tp_hit:
 
             outcome = "TP"
+
             exit_index = j
+
             exit_price = tp_price
 
             break
@@ -1205,7 +1242,9 @@ def simulate_trade(
         if sl_hit:
 
             outcome = "SL"
+
             exit_index = j
+
             exit_price = sl_price
 
             break
@@ -1223,7 +1262,7 @@ def simulate_trade(
         )
 
     # --------------------------------------------------------
-    # R
+    # RISULTATO IN R
     # --------------------------------------------------------
 
     if outcome == "TP":
@@ -1243,9 +1282,10 @@ def simulate_trade(
 
     else:
 
-        if (
-            not np.isfinite(exit_price)
+        if not np.isfinite(
+            exit_price
         ):
+
             result_r = np.nan
 
         elif direction == "BUY":
@@ -1266,14 +1306,21 @@ def simulate_trade(
                 sl_atr * atr
             )
 
-    if np.isfinite(result_r):
+    if np.isfinite(
+        result_r
+    ):
 
         result_r -= COST_R
 
     return {
-        "signal_index": signal_index,
-        "entry_index": entry_index,
-        "exit_index": exit_index,
+        "signal_index":
+            signal_index,
+
+        "entry_index":
+            entry_index,
+
+        "exit_index":
+            exit_index,
 
         "signal_datetime":
             signal_row["datetime"],
@@ -1363,6 +1410,7 @@ def build_trades(
         )
 
         if trade is not None:
+
             trades.append(
                 trade
             )
@@ -1518,7 +1566,8 @@ def enrich_trades(
     ]
 
     available = [
-        c for c in feature_cols
+        c
+        for c in feature_cols
         if c in df.columns
     ]
 
@@ -1526,7 +1575,6 @@ def enrich_trades(
         ["datetime"] + available
     ].copy()
 
-    # Il trade datetime è l'OPEN della candela di ingresso.
     trades = trades.merge(
         source,
         on="datetime",
@@ -1610,32 +1658,54 @@ def summarize(
 
     return {
         "dataset": name,
-        "trades": len(trades),
-        "TP": tp,
-        "SL": sl,
-        "TIMEOUT": timeout,
-        "EXCLUDE": exclude,
-        "win_rate_pct": win_rate,
+
+        "trades":
+            len(trades),
+
+        "TP":
+            tp,
+
+        "SL":
+            sl,
+
+        "TIMEOUT":
+            timeout,
+
+        "EXCLUDE":
+            exclude,
+
+        "win_rate_pct":
+            win_rate,
+
         "avg_R":
             results.mean()
             if len(results)
             else np.nan,
+
         "total_R":
             results.sum()
             if len(results)
             else 0.0,
+
         "profit_factor":
             profit_factor(
                 results.values
             ),
+
         "max_drawdown_R":
             max_drawdown(
                 results.values
             ),
+
         "avg_MFE_ATR":
-            trades["MFE_ATR"].mean(),
+            trades[
+                "MFE_ATR"
+            ].mean(),
+
         "avg_MAE_ATR":
-            trades["MAE_ATR"].mean()
+            trades[
+                "MAE_ATR"
+            ].mean()
     }
 
 
@@ -1673,6 +1743,7 @@ def split_trades(
     )
 
     if trades.empty:
+
         return (
             trades.copy(),
             trades.copy()
@@ -1695,7 +1766,7 @@ def split_trades(
 
 
 # ============================================================
-# GENERAL SUMMARY
+# GENERAL ANALYSIS
 # ============================================================
 
 def general_analysis(
@@ -1818,14 +1889,17 @@ def add_condition_columns(
 
     trades["ema_strength"] = np.select(
         [
-            trades["ema_distance"].abs()
-            < 0.25,
+            trades[
+                "ema_distance"
+            ].abs() < 0.25,
 
-            trades["ema_distance"].abs()
-            < 0.50,
+            trades[
+                "ema_distance"
+            ].abs() < 0.50,
 
-            trades["ema_distance"].abs()
-            < 1.00
+            trades[
+                "ema_distance"
+            ].abs() < 1.00
         ],
         [
             "VERY_WEAK",
@@ -1910,22 +1984,24 @@ def condition_analysis(
         return pd.DataFrame()
 
     conditions = {
-        "ALL": np.ones(
-            len(trades),
-            dtype=bool
-        ),
+
+        "ALL":
+            np.ones(
+                len(trades),
+                dtype=bool
+            ),
 
         "ATR_NORMAL":
-            trades["atr_regime"]
-            == "NORMAL",
+            trades["atr_regime"] ==
+            "NORMAL",
 
         "ATR_HIGH":
-            trades["atr_regime"]
-            == "HIGH",
+            trades["atr_regime"] ==
+            "HIGH",
 
         "EMA_STRONG":
-            trades["ema_strength"]
-            == "STRONG",
+            trades["ema_strength"] ==
+            "STRONG",
 
         "EMA_MEDIUM_STRONG":
             trades["ema_strength"].isin(
@@ -1958,16 +2034,32 @@ def condition_analysis(
 
         "EMA_STRONG_AND_ATR_NORMAL":
             (
-                (trades["ema_strength"] == "STRONG")
+                (
+                    trades[
+                        "ema_strength"
+                    ] == "STRONG"
+                )
                 &
-                (trades["atr_regime"] == "NORMAL")
+                (
+                    trades[
+                        "atr_regime"
+                    ] == "NORMAL"
+                )
             ),
 
         "EMA_STRONG_AND_MOM6":
             (
-                (trades["ema_strength"] == "STRONG")
+                (
+                    trades[
+                        "ema_strength"
+                    ] == "STRONG"
+                )
                 &
-                (trades["momentum_6"] > 0)
+                (
+                    trades[
+                        "momentum_6"
+                    ] > 0
+                )
             )
     }
 
@@ -1980,34 +2072,40 @@ def condition_analysis(
         ]
 
         dev = subset[
-            subset["signal_datetime"]
-            <= split_datetime
+            subset[
+                "signal_datetime"
+            ] <= split_datetime
         ]
 
         ver = subset[
-            subset["signal_datetime"]
-            > split_datetime
+            subset[
+                "signal_datetime"
+            ] > split_datetime
         ]
 
         row = {
             "condition": name
         }
 
+        dev_summary = summarize(
+            dev,
+            "DEV"
+        )
+
+        ver_summary = summarize(
+            ver,
+            "VER"
+        )
+
         row.update({
             f"dev_{k}": v
-            for k, v in summarize(
-                dev,
-                "DEV"
-            ).items()
+            for k, v in dev_summary.items()
             if k != "dataset"
         })
 
         row.update({
             f"ver_{k}": v
-            for k, v in summarize(
-                ver,
-                "VER"
-            ).items()
+            for k, v in ver_summary.items()
             if k != "dataset"
         })
 
@@ -2090,6 +2188,7 @@ def evaluate_matrix(
                         )
 
                         if trade is not None:
+
                             trades.append(
                                 trade
                             )
@@ -2174,7 +2273,10 @@ def target_analysis(
                         row["_signal_index"]
                     )
 
-                    if signal_index >= len(df) - 1:
+                    if (
+                        signal_index
+                        >= len(df) - 1
+                    ):
                         continue
 
                     entry_index = (
@@ -2196,7 +2298,9 @@ def target_analysis(
                             entry_price
                         )
                         or
-                        not np.isfinite(atr)
+                        not np.isfinite(
+                            atr
+                        )
                         or
                         atr <= 0
                     ):
@@ -2249,6 +2353,7 @@ def target_analysis(
                             )
 
                             found = True
+
                             break
 
                     if found:
@@ -2259,6 +2364,7 @@ def target_analysis(
                 )
 
                 rows.append({
+
                     "dataset":
                         dataset_name,
 
@@ -2304,7 +2410,7 @@ def target_analysis(
 
 
 # ============================================================
-# TIME HORIZONS
+# TIME HORIZONS V5
 # ============================================================
 
 def horizon_analysis(
@@ -2325,6 +2431,29 @@ def horizon_analysis(
 
     rows = []
 
+    if signals is None or signals.empty:
+
+        return pd.DataFrame(
+            columns=[
+                "dataset",
+                "trades",
+                "TP",
+                "SL",
+                "TIMEOUT",
+                "EXCLUDE",
+                "win_rate_pct",
+                "avg_R",
+                "total_R",
+                "profit_factor",
+                "max_drawdown_R",
+                "avg_MFE_ATR",
+                "avg_MAE_ATR",
+                "direction",
+                "horizon_minutes",
+                "horizon_bars"
+            ]
+        )
+
     for direction in [
         "BUY",
         "SELL"
@@ -2334,6 +2463,9 @@ def horizon_analysis(
             signals["direction"] ==
             direction
         ]
+
+        if direction_signals.empty:
+            continue
 
         for minutes in horizons_minutes:
 
@@ -2348,9 +2480,19 @@ def horizon_analysis(
                 direction_signals.iterrows()
             ):
 
-                signal_index = int(
-                    row["_signal_index"]
-                )
+                try:
+
+                    signal_index = int(
+                        row["_signal_index"]
+                    )
+
+                except (
+                    KeyError,
+                    TypeError,
+                    ValueError
+                ):
+
+                    continue
 
                 trade = simulate_trade(
                     df=df,
@@ -2361,6 +2503,7 @@ def horizon_analysis(
                 )
 
                 if trade is not None:
+
                     trades.append(
                         trade
                     )
@@ -2371,4 +2514,511 @@ def horizon_analysis(
             )
 
             summary[
-               
+                "direction"
+            ] = direction
+
+            summary[
+                "horizon_minutes"
+            ] = minutes
+
+            summary[
+                "horizon_bars"
+            ] = bars
+
+            rows.append(
+                summary
+            )
+
+    result = pd.DataFrame(
+        rows
+    )
+
+    if not result.empty:
+
+        result = result.sort_values(
+            [
+                "direction",
+                "horizon_minutes"
+            ]
+        ).reset_index(
+            drop=True
+        )
+
+    return result
+
+
+# ============================================================
+# SALVATAGGIO CSV
+# ============================================================
+
+def save_csv(
+    data,
+    filename
+):
+
+    data = ensure_dataframe(
+        data
+    )
+
+    if data.empty:
+
+        print(
+            f"Nessun dato da salvare: {filename}"
+        )
+
+        return
+
+    path = os.path.join(
+        OUTPUT_DIR,
+        filename
+    )
+
+    data.to_csv(
+        path,
+        index=False
+    )
+
+    print(
+        f"Salvato: {path}"
+    )
+
+
+# ============================================================
+# MAIN
+# ============================================================
+
+def main():
+
+    start_time = time.time()
+
+    print_separator(
+        "XAU/USD BACKTEST V5"
+    )
+
+    print(
+        f"Symbol:       {SYMBOL}"
+    )
+
+    print(
+        f"Interval:     {INTERVAL}"
+    )
+
+    print(
+        f"Candele:      {TOTAL_CANDLES}"
+    )
+
+    print(
+        f"Development:  {DEVELOPMENT_PCT * 100:.0f}%"
+    )
+
+    print(
+        f"Verification: {(1 - DEVELOPMENT_PCT) * 100:.0f}%"
+    )
+
+    print(
+        f"TP base:      {DEFAULT_TP_ATR} ATR"
+    )
+
+    print(
+        f"SL base:      {DEFAULT_SL_ATR} ATR"
+    )
+
+    print(
+        f"Horizon:      {HORIZON_BARS * 5 / 60:.1f} ore"
+    )
+
+    print(
+        f"Same candle:  {SAME_CANDLE_MODE}"
+    )
+
+    # --------------------------------------------------------
+    # 1. DOWNLOAD
+    # --------------------------------------------------------
+
+    df = download_history()
+
+    # --------------------------------------------------------
+    # 2. INDICATORI
+    # --------------------------------------------------------
+
+    print_separator(
+        "CALCOLO INDICATORI"
+    )
+
+    df = calculate_indicators(
+        df
+    )
+
+    # --------------------------------------------------------
+    # 3. MULTI TIMEFRAME
+    # --------------------------------------------------------
+
+    df = add_higher_timeframes(
+        df
+    )
+
+    # --------------------------------------------------------
+    # 4. SEGNALI
+    # --------------------------------------------------------
+
+    df = generate_signals(
+        df
+    )
+
+    # --------------------------------------------------------
+    # 5. SPLIT TEMPORALE
+    # --------------------------------------------------------
+
+    split_datetime = get_split_datetime(
+        df
+    )
+
+    print_separator(
+        "SPLIT TEMPORALE"
+    )
+
+    print(
+        "Split:",
+        split_datetime
+    )
+
+    print(
+        "Development:",
+        df["datetime"].iloc[0],
+        "->",
+        split_datetime
+    )
+
+    print(
+        "Verification:",
+        split_datetime,
+        "->",
+        df["datetime"].iloc[-1]
+    )
+
+    # --------------------------------------------------------
+    # 6. SIGNAL MODES
+    # --------------------------------------------------------
+
+    modes = build_signal_modes(
+        df
+    )
+
+    # --------------------------------------------------------
+    # 7. ANALISI PRINCIPALE
+    # --------------------------------------------------------
+
+    print_separator(
+        "ANALISI STRATEGIA BASE"
+    )
+
+    signals = modes["ALL"]
+
+    (
+        trades,
+        development,
+        verification,
+        general
+    ) = general_analysis(
+        df,
+        signals,
+        split_datetime
+    )
+
+    print_table(
+        "SUMMARY GENERALE",
+        general
+    )
+
+    # --------------------------------------------------------
+    # 8. BUY / SELL
+    # --------------------------------------------------------
+
+    direction = direction_analysis(
+        trades,
+        split_datetime
+    )
+
+    print_table(
+        "ANALISI BUY / SELL",
+        direction
+    )
+
+    # --------------------------------------------------------
+    # 9. FILTRI DIAGNOSTICI
+    # --------------------------------------------------------
+
+    conditions = condition_analysis(
+        trades,
+        split_datetime
+    )
+
+    print_table(
+        "DIAGNOSTICA FILTRI",
+        conditions
+    )
+
+    # --------------------------------------------------------
+    # 10. TP / SL MATRIX
+    # --------------------------------------------------------
+
+    print_separator(
+        "MATRICE TP / SL"
+    )
+
+    matrix = evaluate_matrix(
+        df,
+        signals,
+        split_datetime
+    )
+
+    print_table(
+        "MATRICE TP / SL",
+        matrix
+    )
+
+    # --------------------------------------------------------
+    # 11. TARGET REACH
+    # --------------------------------------------------------
+
+    print_separator(
+        "TARGET REACH ANALYSIS"
+    )
+
+    targets = target_analysis(
+        df,
+        signals,
+        split_datetime
+    )
+
+    print_table(
+        "TARGET REACH",
+        targets
+    )
+
+    # --------------------------------------------------------
+    # 12. TIME HORIZONS
+    # --------------------------------------------------------
+
+    print_separator(
+        "TIME HORIZON ANALYSIS"
+    )
+
+    horizons = horizon_analysis(
+        df,
+        signals
+    )
+
+    print_table(
+        "TIME HORIZONS",
+        horizons
+    )
+
+    # --------------------------------------------------------
+    # 13. SALVATAGGIO
+    # --------------------------------------------------------
+
+    print_separator(
+        "SALVATAGGIO RISULTATI"
+    )
+
+    save_csv(
+        df,
+        "candles_with_indicators.csv"
+    )
+
+    save_csv(
+        signals,
+        "signals_all.csv"
+    )
+
+    save_csv(
+        trades,
+        "trades_all.csv"
+    )
+
+    save_csv(
+        development,
+        "trades_development.csv"
+    )
+
+    save_csv(
+        verification,
+        "trades_verification.csv"
+    )
+
+    save_csv(
+        general,
+        "summary_general.csv"
+    )
+
+    save_csv(
+        direction,
+        "summary_direction.csv"
+    )
+
+    save_csv(
+        conditions,
+        "diagnostic_conditions.csv"
+    )
+
+    save_csv(
+        matrix,
+        "matrix_tp_sl.csv"
+    )
+
+    save_csv(
+        targets,
+        "target_analysis.csv"
+    )
+
+    save_csv(
+        horizons,
+        "horizon_analysis.csv"
+    )
+
+    # --------------------------------------------------------
+    # 14. RIEPILOGO MODALITÀ
+    # --------------------------------------------------------
+
+    mode_rows = []
+
+    for name, mode_signals in modes.items():
+
+        mode_trades = build_trades(
+            df,
+            mode_signals
+        )
+
+        mode_trades = enrich_trades(
+            mode_trades,
+            df
+        )
+
+        mode_dev, mode_ver = (
+            split_trades(
+                mode_trades,
+                split_datetime
+            )
+        )
+
+        summary_dev = summarize(
+            mode_dev,
+            f"{name}_DEVELOPMENT"
+        )
+
+        summary_ver = summarize(
+            mode_ver,
+            f"{name}_VERIFICATION"
+        )
+
+        mode_rows.append({
+            "mode":
+                name,
+
+            "development_trades":
+                summary_dev["trades"],
+
+            "development_win_rate":
+                summary_dev[
+                    "win_rate_pct"
+                ],
+
+            "development_avg_R":
+                summary_dev[
+                    "avg_R"
+                ],
+
+            "development_total_R":
+                summary_dev[
+                    "total_R"
+                ],
+
+            "development_PF":
+                summary_dev[
+                    "profit_factor"
+                ],
+
+            "verification_trades":
+                summary_ver["trades"],
+
+            "verification_win_rate":
+                summary_ver[
+                    "win_rate_pct"
+                ],
+
+            "verification_avg_R":
+                summary_ver[
+                    "avg_R"
+                ],
+
+            "verification_total_R":
+                summary_ver[
+                    "total_R"
+                ],
+
+            "verification_PF":
+                summary_ver[
+                    "profit_factor"
+                ]
+        })
+
+    modes_summary = pd.DataFrame(
+        mode_rows
+    )
+
+    print_table(
+        "CONFRONTO SIGNAL MODES",
+        modes_summary
+    )
+
+    save_csv(
+        modes_summary,
+        "signal_modes_summary.csv"
+    )
+
+    # --------------------------------------------------------
+    # 15. FINE
+    # --------------------------------------------------------
+
+    elapsed = (
+        time.time() -
+        start_time
+    )
+
+    print_separator(
+        "BACKTEST V5 COMPLETATO"
+    )
+
+    print(
+        f"Tempo totale: {elapsed:.2f} secondi"
+    )
+
+    print(
+        f"Risultati salvati in: {OUTPUT_DIR}"
+    )
+
+
+# ============================================================
+# ENTRY POINT
+# ============================================================
+
+if __name__ == "__main__":
+
+    try:
+
+        main()
+
+    except Exception as e:
+
+        print_separator(
+            "ERRORE BACKTEST V5"
+        )
+
+        print(
+            repr(e)
+        )
+
+        traceback.print_exc()
+
+        raise
