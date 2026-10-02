@@ -20,7 +20,7 @@ INTERVAL = "5min"
 ROME_TZ = ZoneInfo("Europe/Rome")
 UTC_TZ = timezone.utc
 # ============================================================
-# PARAMETRI STRATEGIA V8
+# STRATEGIA V8
 # ============================================================
 EMA_FAST = 20
 EMA_MID = 50
@@ -31,15 +31,14 @@ MACD_FAST = 12
 MACD_SLOW = 26
 MACD_SIGNAL = 9
 MOMENTUM_PERIOD = 6
-# V8
+# BODY_STRONG V8
 BODY_RATIO_MIN = 0.60
-# V8 candidato principale
+# Parametri candidati V8
 SL_ATR = 1.25
 TP_ATR = 2.50
-# Cooldown 30 minuti = 6 candele da 5 minuti
+# Cooldown V8
 COOLDOWN_MINUTES = 30
-COOLDOWN_CANDLES = COOLDOWN_MINUTES // 5
-# Orizzonte del backtest V8
+# Orizzonte di riferimento del backtest
 HORIZON_MINUTES = 30
 # ============================================================
 # TELEGRAM
@@ -124,21 +123,22 @@ def scarica_dati():
         .reset_index(drop=True)
     )
     # --------------------------------------------------------
-    # CONTROLLO ORARIO
+    # ORA ATTUALE
     # --------------------------------------------------------
     adesso_utc = pd.Timestamp.now(tz="UTC")
+    adesso_roma = adesso_utc.tz_convert(ROME_TZ)
     print("")
-    print("🕐 CONTROLLO DATI")
+    print("🕐 CONTROLLO ORARIO")
     print("----------------------------------------")
     print(
         "Ora attuale UTC:",
         adesso_utc.strftime("%d/%m/%Y %H:%M:%S")
     )
     print(
-        "Ultimo timestamp ricevuto:",
-        df["datetime"].iloc[-1]
-        .strftime("%d/%m/%Y %H:%M:%S UTC")
+        "Ora attuale Roma:",
+        adesso_roma.strftime("%d/%m/%Y %H:%M:%S")
     )
+    print("----------------------------------------")
     # --------------------------------------------------------
     # ELIMINA DATI FUTURI
     # --------------------------------------------------------
@@ -146,14 +146,17 @@ def scarica_dati():
         df["datetime"] <= adesso_utc
     ].copy()
     if df.empty:
-        print("❌ Nessun dato valido non futuro")
+        print("❌ Nessun dato valido")
         return None
     # --------------------------------------------------------
     # SOLO CANDELE 5M COMPLETAMENTE CHIUSE
+    #
+    # Se una candela parte alle 21:10, termina alle 21:15.
+    # Alle 21:19 quella candela è quindi completamente chiusa.
     # --------------------------------------------------------
-    durata_candela = pd.Timedelta(minutes=5)
+    durata_5m = pd.Timedelta(minutes=5)
     df_chiuse = df[
-        df["datetime"] + durata_candela
+        df["datetime"] + durata_5m
         <= adesso_utc
     ].copy()
     if df_chiuse.empty:
@@ -161,11 +164,11 @@ def scarica_dati():
         return None
     ultima = df_chiuse["datetime"].iloc[-1]
     print(
-        "Ultima candela 5m chiusa:",
-        ultima.strftime("%d/%m/%Y %H:%M UTC")
+        "Ultima candela 5m chiusa UTC:",
+        ultima.strftime("%d/%m/%Y %H:%M")
     )
     print(
-        "Ultima candela 5m chiusa (Roma):",
+        "Ultima candela 5m chiusa Roma:",
         ultima
         .astimezone(ROME_TZ)
         .strftime("%d/%m/%Y %H:%M")
@@ -178,7 +181,7 @@ def scarica_dati():
 def calcola_indicatori(df):
     df = df.copy()
     # --------------------------------------------------------
-    # EMA 20 / 50 / 100
+    # EMA
     # --------------------------------------------------------
     df["EMA20"] = (
         df["close"]
@@ -233,7 +236,7 @@ def calcola_indicatori(df):
         .mean()
     )
     # --------------------------------------------------------
-    # RSI 14
+    # RSI
     # --------------------------------------------------------
     delta = df["close"].diff()
     gain = delta.clip(lower=0)
@@ -262,7 +265,7 @@ def calcola_indicatori(df):
         (100 / (1 + rs))
     )
     # --------------------------------------------------------
-    # ATR 14
+    # ATR
     # --------------------------------------------------------
     high_low = (
         df["high"] -
@@ -302,8 +305,6 @@ def calcola_indicatori(df):
     )
     # --------------------------------------------------------
     # BODY RATIO
-    #
-    # Corpo della candela / range totale
     # --------------------------------------------------------
     df["BODY"] = abs(
         df["close"] -
@@ -321,9 +322,9 @@ def calcola_indicatori(df):
     )
     return df
 # ============================================================
-# TREND 15 MINUTI
+# TREND 15M
 # ============================================================
-def calcola_trend_15m(df):
+def calcola_trend_15m(df, adesso_utc):
     df_15m = (
         df
         .set_index("datetime")
@@ -340,7 +341,6 @@ def calcola_trend_15m(df):
     # --------------------------------------------------------
     # SOLO CANDELE 15M COMPLETAMENTE CHIUSE
     # --------------------------------------------------------
-    adesso_utc = pd.Timestamp.now(tz="UTC")
     df_15m = df_15m[
         df_15m["datetime"] +
         pd.Timedelta(minutes=15)
@@ -349,7 +349,7 @@ def calcola_trend_15m(df):
     if len(df_15m) < 50:
         return "NEUTRAL", None
     # --------------------------------------------------------
-    # EMA 20 / 50
+    # EMA 15M
     # --------------------------------------------------------
     df_15m["EMA20_15"] = (
         df_15m["close"]
@@ -382,54 +382,58 @@ def calcola_trend_15m(df):
         trend = "NEUTRAL"
     return trend, ultima["datetime"]
 # ============================================================
-# CONTROLLO COOLDOWN
+# CONTROLLO SETUP PRECEDENTE
+# ============================================================
+def setup_sell_valido(row):
+    if pd.isna(row["EMA20"]):
+        return False
+    if pd.isna(row["EMA50"]):
+        return False
+    if pd.isna(row["EMA100"]):
+        return False
+    if pd.isna(row["MACD"]):
+        return False
+    if pd.isna(row["MACD_signal"]):
+        return False
+    if pd.isna(row["RSI"]):
+        return False
+    if pd.isna(row["MOM6"]):
+        return False
+    if pd.isna(row["BODY_RATIO"]):
+        return False
+    return (
+        row["EMA20"] < row["EMA50"] < row["EMA100"]
+        and row["MACD"] < row["MACD_signal"]
+        and 30 < row["RSI"] < 65
+        and row["MOM6"] < 0
+        and row["BODY_RATIO"] >= BODY_RATIO_MIN
+    )
+# ============================================================
+# COOLDOWN
 # ============================================================
 def controllo_cooldown(df):
-    if len(df) <= COOLDOWN_CANDLES:
-        return True, None
-    # --------------------------------------------------------
-    # Analizziamo le candele precedenti alla corrente.
-    #
-    # Se nelle ultime 30m c'è già stata una configurazione
-    # SELL valida, evitiamo di generare un altro segnale.
-    # --------------------------------------------------------
-    precedenti = df.iloc[
-        -COOLDOWN_CANDLES - 1:-1
+    cutoff = (
+        df["datetime"].iloc[-1]
+        - pd.Timedelta(minutes=COOLDOWN_MINUTES)
+    )
+    precedenti = df[
+        (df["datetime"] < df["datetime"].iloc[-1])
+        &
+        (df["datetime"] >= cutoff)
     ].copy()
+    # --------------------------------------------------------
+    # IMPORTANTE:
+    #
+    # Non consideriamo un semplice setup come "trade".
+    # Il cooldown viene attivato solo se una candela precedente
+    # ha generato un setup SELL completo.
+    # --------------------------------------------------------
     for _, row in precedenti.iterrows():
-        sell_ema = (
-            row["EMA20"] <
-            row["EMA50"] <
-            row["EMA100"]
-        )
-        sell_macd = (
-            row["MACD"] <
-            row["MACD_signal"]
-        )
-        sell_rsi = (
-            30 < row["RSI"] < 65
-        )
-        sell_momentum = (
-            row["MOM6"] < 0
-        )
-        body_strong = (
-            row["BODY_RATIO"] >=
-            BODY_RATIO_MIN
-        )
-        if (
-            sell_ema
-            and sell_macd
-            and sell_rsi
-            and sell_momentum
-            and body_strong
-        ):
-            return (
-                False,
-                row["datetime"]
-            )
+        if setup_sell_valido(row):
+            return False, row["datetime"]
     return True, None
 # ============================================================
-# ANALISI XAU/USD
+# ANALISI
 # ============================================================
 def analizza_xauusd():
     df = scarica_dati()
@@ -438,18 +442,23 @@ def analizza_xauusd():
     if len(df) < 150:
         print("❌ Dati insufficienti")
         return None
+    # Ora usata per tutti i controlli temporali
+    adesso_utc = pd.Timestamp.now(tz="UTC")
     df = calcola_indicatori(df)
     # --------------------------------------------------------
     # TREND 15M
     # --------------------------------------------------------
     trend_15m, trend_datetime = (
-        calcola_trend_15m(df)
+        calcola_trend_15m(
+            df,
+            adesso_utc
+        )
     )
     # --------------------------------------------------------
-    # ULTIMA CANDELA 5M CHIUSA
+    # ULTIMA 5M CHIUSA
     # --------------------------------------------------------
     candela = df.iloc[-1]
-    preco = candela["close"]
+    prezzo = candela["close"]
     ema20 = candela["EMA20"]
     ema50 = candela["EMA50"]
     ema100 = candela["EMA100"]
@@ -462,16 +471,13 @@ def analizza_xauusd():
     candle_range = candela["RANGE"]
     body_ratio = candela["BODY_RATIO"]
     # --------------------------------------------------------
-    # FILTRI SELL V8
+    # FILTRI SELL
     # --------------------------------------------------------
     sell_ema = (
-        ema20 <
-        ema50 <
-        ema100
+        ema20 < ema50 < ema100
     )
     sell_macd = (
-        macd <
-        macd_signal
+        macd < macd_signal
     )
     sell_rsi = (
         30 < rsi < 65
@@ -483,12 +489,8 @@ def analizza_xauusd():
         mom6 < 0
     )
     sell_body = (
-        body_ratio >=
-        BODY_RATIO_MIN
+        body_ratio >= BODY_RATIO_MIN
     )
-    # --------------------------------------------------------
-    # COOLDOWN
-    # --------------------------------------------------------
     cooldown_ok, cooldown_datetime = (
         controllo_cooldown(df)
     )
@@ -512,36 +514,49 @@ def analizza_xauusd():
     sl = None
     tp = None
     if segnale == "SELL":
-        sl = preco + (
+        sl = prezzo + (
             SL_ATR * atr
         )
-        tp = preco - (
+        tp = prezzo - (
             TP_ATR * atr
         )
-    # --------------------------------------------------------
+    # ========================================================
     # DIAGNOSTICA
-    # --------------------------------------------------------
+    # ========================================================
     candela_roma = (
         candela["datetime"]
         .astimezone(ROME_TZ)
     )
     print("")
     print("========================================")
-    print("📊 ANALISI XAU/USD — V8")
+    print("📊 ANALISI XAU/USD — V8.1")
     print("========================================")
     print(
-        f"⏰ Candela UTC: "
-        f"{candela['datetime'].strftime('%d/%m/%Y %H:%M')}"
+        "⏰ Ora esecuzione UTC:",
+        adesso_utc.strftime("%d/%m/%Y %H:%M:%S")
     )
     print(
-        f"🇮🇹 Candela Roma: "
-        f"{candela_roma.strftime('%d/%m/%Y %H:%M')}"
+        "🇮🇹 Ora esecuzione Roma:",
+        adesso_utc
+        .astimezone(ROME_TZ)
+        .strftime("%d/%m/%Y %H:%M:%S")
+    )
+    print("")
+    print(
+        "⏰ Candela UTC:",
+        candela["datetime"]
+        .strftime("%d/%m/%Y %H:%M")
     )
     print(
-        f"💰 Prezzo: {preco:.2f}"
+        "🇮🇹 Candela Roma:",
+        candela_roma.strftime("%d/%m/%Y %H:%M")
+    )
+    print(
+        f"💰 Prezzo: {prezzo:.2f}"
     )
     print("")
     print("📐 INDICATORI")
+    print("----------------------------------------")
     print(
         f"EMA20:  {ema20:.4f}"
     )
@@ -568,6 +583,7 @@ def analizza_xauusd():
     )
     print("")
     print("🕯️ FORZA CANDELA")
+    print("----------------------------------------")
     print(
         f"Body: {body:.4f}"
     )
@@ -578,7 +594,7 @@ def analizza_xauusd():
         f"Body Ratio: {body_ratio:.3f}"
     )
     print(
-        f"Soglia Body: {BODY_RATIO_MIN:.2f}"
+        f"Soglia: {BODY_RATIO_MIN:.2f}"
     )
     print("")
     print(
@@ -586,13 +602,14 @@ def analizza_xauusd():
     )
     if trend_datetime is not None:
         print(
-            "🕐 Ultimo trend 15m chiuso:",
+            "🕐 Candela trend 15m:",
             trend_datetime
             .astimezone(ROME_TZ)
             .strftime("%d/%m/%Y %H:%M")
         )
     print("")
     print("🔴 FILTRI SELL")
+    print("----------------------------------------")
     print(
         f"EMA20 < EMA50 < EMA100: "
         f"{'✅' if sell_ema else '❌'}"
@@ -618,18 +635,23 @@ def analizza_xauusd():
         f"{'✅' if sell_body else '❌'}"
     )
     print(
-        f"Cooldown 30m: "
+        f"Cooldown {COOLDOWN_MINUTES}m: "
         f"{'✅' if cooldown_ok else '❌'}"
     )
-    if not cooldown_ok and cooldown_datetime is not None:
+    if (
+        not cooldown_ok
+        and cooldown_datetime is not None
+    ):
         print(
-            "Ultimo setup trovato:",
+            "Setup precedente:",
             cooldown_datetime
             .astimezone(ROME_TZ)
             .strftime("%d/%m/%Y %H:%M")
         )
     print("")
-    print(f"➡️ SEGNALE: {segnale}")
+    print(
+        f"➡️ SEGNALE: {segnale}"
+    )
     if sl is not None:
         print(
             f"🛑 SL: {sl:.2f}"
@@ -642,7 +664,7 @@ def analizza_xauusd():
     return {
         "signal": segnale,
         "datetime": candela["datetime"],
-        "price": preco,
+        "price": prezzo,
         "sl": sl,
         "tp": tp,
         "rsi": rsi,
@@ -661,7 +683,7 @@ def analizza_xauusd():
         "cooldown_ok": cooldown_ok
     }
 # ============================================================
-# MESSAGGIO TELEGRAM
+# TELEGRAM
 # ============================================================
 def crea_messaggio(r):
     candela_roma = (
@@ -670,8 +692,8 @@ def crea_messaggio(r):
         .strftime("%d/%m/%Y %H:%M")
     )
     return (
-        "🧪 PAPER/DEMO — V8\n\n"
-        "🔴 XAU/USD — SELL\n\n"
+        "🧪 PAPER/DEMO — XAU/USD V8.1\n\n"
+        "🔴 SELL\n\n"
         f"⏰ Candela: {candela_roma}\n"
         f"💰 Entry: {r['price']:.2f}\n"
         f"🛑 SL: {r['sl']:.2f}\n"
@@ -683,8 +705,8 @@ def crea_messaggio(r):
         f"Trend 15m: {r['trend_15m']}\n\n"
         f"SL: {SL_ATR:.2f} ATR\n"
         f"TP: {TP_ATR:.2f} ATR\n"
-        f"Orizzonte test: {HORIZON_MINUTES} min\n"
-        f"Cooldown: {COOLDOWN_MINUTES} min\n\n"
+        f"Cooldown: {COOLDOWN_MINUTES} min\n"
+        f"Orizzonte test: {HORIZON_MINUTES} min\n\n"
         "⚠️ Segnale sperimentale PAPER/DEMO.\n"
         "Nessun ordine reale viene eseguito."
     )
@@ -692,10 +714,10 @@ def crea_messaggio(r):
 # ESECUZIONE
 # ============================================================
 print("========================================")
-print("🤖 XAU/USD BOT — V8 PAPER/DEMO")
+print("🤖 XAU/USD BOT — V8.1 PAPER/DEMO")
 print("========================================")
 print("")
-print("Strategia:")
+print("STRATEGIA:")
 print("SELL + BODY_STRONG")
 print(
     f"Body Ratio >= {BODY_RATIO_MIN:.2f}"
@@ -709,6 +731,9 @@ print(
 print(
     f"Cooldown = {COOLDOWN_MINUTES} min"
 )
+print(
+    f"Horizon = {HORIZON_MINUTES} min"
+)
 print("")
 try:
     risultato = analizza_xauusd()
@@ -717,7 +742,8 @@ try:
         raise SystemExit(0)
     segnale = risultato["signal"]
     if segnale == "SELL":
-        print("📨 Segnale SELL trovato")
+        print("")
+        print("📨 SEGNALE SELL TROVATO")
         messaggio = crea_messaggio(
             risultato
         )
@@ -725,12 +751,12 @@ try:
             messaggio
         )
     else:
-        print(
-            "⏳ Nessun segnale SELL valido"
-        )
+        print("")
+        print("⏳ Nessun segnale SELL valido")
     print("")
     print("✅ Esecuzione terminata")
 except Exception as e:
+    print("")
     print("❌ ERRORE:")
     print(e)
     raise
