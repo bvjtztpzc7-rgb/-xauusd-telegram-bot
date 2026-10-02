@@ -21,42 +21,140 @@ INTERVAL = "5min"
 API_KEY = os.getenv("TWELVE_DATA_API_KEY")
 
 if not API_KEY:
-    raise RuntimeError("TWELVE_DATA_API_KEY non configurato")
+    raise RuntimeError(
+        "TWELVE_DATA_API_KEY non configurato"
+    )
 
-OUTPUT_DIR = "backtest_results_v6"
+OUTPUT_DIR = "backtest_results_v7"
 os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+# ------------------------------------------------------------
+# DATI
+# ------------------------------------------------------------
 
 N_CANDLES = 10000
 
-DEV_FRAC = 0.70
+# V7:
+# DEV = 60%
+# VALIDATION = 20%
+# TEST = 20%
+DEV_FRAC = 0.60
+VAL_FRAC = 0.20
+
+# ------------------------------------------------------------
+# TP / SL
+# ------------------------------------------------------------
+
+# Ricerca principale.
+# Include il candidato V6:
+# BUY + ATR_HIGH + TP 2.0 / SL 1.0 + 60m
 
 TP_VALUES = [
-    0.5,
     1.0,
     1.5,
+    1.75,
     2.0,
+    2.25,
     2.5,
     3.0,
 ]
 
 SL_VALUES = [
     0.5,
+    0.75,
     1.0,
+    1.25,
     1.5,
     2.0,
-    2.5,
-    3.0,
 ]
 
 HORIZONS = [
-    15,
     30,
     60,
 ]
 
-MIN_TRADES_DEV = 20
-MIN_TRADES_VER = 10
+# ------------------------------------------------------------
+# FILTRI
+# ------------------------------------------------------------
 
+MODES = [
+    "BASE",
+    "ATR_HIGH",
+    "BODY",
+    "RSI_MID",
+    "TREND_1H",
+    "EMA_STRONG",
+]
+
+DIRECTIONS = [
+    "BUY",
+    "SELL",
+]
+
+# ------------------------------------------------------------
+# MINIMO TRADE
+# ------------------------------------------------------------
+
+MIN_TRADES_DEV = 20
+MIN_TRADES_VAL = 10
+MIN_TRADES_TEST = 10
+
+# ------------------------------------------------------------
+# COSTI / SLIPPAGE
+# ------------------------------------------------------------
+
+# Valori espressi in punti prezzo XAU/USD.
+#
+# Esempio:
+# spread medio simulato per lato = 0.05
+# slippage per lato = 0.05
+#
+# Totale teorico round-trip = 0.20
+#
+# Sono parametri volutamente configurabili.
+# NON rappresentano una promessa sul costo reale del broker.
+
+SPREAD_PER_SIDE = 0.05
+SLIPPAGE_PER_SIDE = 0.05
+
+ENTRY_COST = (
+    SPREAD_PER_SIDE +
+    SLIPPAGE_PER_SIDE
+)
+
+EXIT_COST = (
+    SPREAD_PER_SIDE +
+    SLIPPAGE_PER_SIDE
+)
+
+# ------------------------------------------------------------
+# GESTIONE SEGNALI
+# ------------------------------------------------------------
+
+ENTRY_MODES = [
+    "FIRST",
+    "NON_OVERLAP",
+    "COOLDOWN_30",
+    "COOLDOWN_60",
+]
+
+# ------------------------------------------------------------
+# SENSITIVITY
+# ------------------------------------------------------------
+
+SENSITIVITY_TP = [
+    1.5,
+    1.75,
+    2.0,
+    2.25,
+    2.5,
+]
+
+SENSITIVITY_SL = [
+    0.75,
+    1.0,
+    1.25,
+]
 
 # ============================================================
 # DOWNLOAD DATI
@@ -73,7 +171,10 @@ def get_data():
 
     while remaining > 0:
 
-        size = min(5000, remaining)
+        size = min(
+            5000,
+            remaining
+        )
 
         params = {
             "symbol": SYMBOL,
@@ -102,18 +203,30 @@ def get_data():
                 f"Twelve Data ha restituito: {data}"
             )
 
-        df = pd.DataFrame(data["values"])
+        chunk = pd.DataFrame(
+            data["values"]
+        )
 
-        frames.append(df)
-
-        if len(df) < size:
+        if chunk.empty:
             break
 
-        end = str(df["datetime"].min())
+        frames.append(chunk)
 
-        remaining -= len(df)
+        if len(chunk) < size:
+            break
+
+        end = str(
+            chunk["datetime"].min()
+        )
+
+        remaining -= len(chunk)
 
         time.sleep(0.2)
+
+    if not frames:
+        raise RuntimeError(
+            "Nessun dato scaricato."
+        )
 
     df = pd.concat(
         frames,
@@ -124,7 +237,9 @@ def get_data():
         subset=["datetime"]
     )
 
-    df = df.tail(N_CANDLES)
+    df = df.tail(
+        N_CANDLES
+    )
 
     for column in [
         "open",
@@ -143,9 +258,11 @@ def get_data():
         utc=True,
     )
 
-    df = df.sort_values(
-        "datetime"
-    ).reset_index(drop=True)
+    df = (
+        df
+        .sort_values("datetime")
+        .reset_index(drop=True)
+    )
 
     return df
 
@@ -186,7 +303,10 @@ def rsi(series, period=14):
 
     rs = (
         avg_gain /
-        avg_loss.replace(0, np.nan)
+        avg_loss.replace(
+            0,
+            np.nan,
+        )
     )
 
     return 100 - (
@@ -196,7 +316,9 @@ def rsi(series, period=14):
 
 def atr(df, period=14):
 
-    previous_close = df["close"].shift(1)
+    previous_close = (
+        df["close"].shift(1)
+    )
 
     true_range = pd.concat(
         [
@@ -224,7 +346,8 @@ def atr(df, period=14):
 def macd(series):
 
     macd_line = (
-        ema(series, 12) -
+        ema(series, 12)
+        -
         ema(series, 26)
     )
 
@@ -233,11 +356,14 @@ def macd(series):
         9,
     )
 
-    return macd_line, signal_line
+    return (
+        macd_line,
+        signal_line,
+    )
 
 
 # ============================================================
-# AGGIUNTA INDICATORI
+# INDICATORI 5m
 # ============================================================
 
 def add_indicators(df):
@@ -287,11 +413,6 @@ def add_indicators(df):
         * 100
     )
 
-    df["mom12"] = (
-        df["close"].pct_change(12)
-        * 100
-    )
-
     df["body"] = (
         df["close"] -
         df["open"]
@@ -322,11 +443,21 @@ def add_indicators(df):
         )
     )
 
+    # --------------------------------------------------------
+    # ATR REGIME
+    # --------------------------------------------------------
+
+    df["atr_median_200"] = (
+        df["atr_pct"]
+        .rolling(200)
+        .median()
+    )
+
     return df
 
 
 # ============================================================
-# TIMEFRAME SUPERIORI
+# TIMEFRAME SUPERIORI - LEAKAGE FREE
 # ============================================================
 
 def make_timeframe(df, rule):
@@ -341,7 +472,11 @@ def make_timeframe(df, rule):
                 "close",
             ]
         ]
-        .resample(rule)
+        .resample(
+            rule,
+            label="left",
+            closed="left",
+        )
         .agg(
             {
                 "open": "first",
@@ -352,6 +487,30 @@ def make_timeframe(df, rule):
         )
         .dropna()
         .reset_index()
+    )
+
+    # --------------------------------------------------------
+    # IMPORTANTISSIMO
+    #
+    # La candela 15m/1H viene etichettata all'inizio
+    # dell'intervallo.
+    #
+    # Esempio:
+    #
+    # 10:00 -> 10:15
+    #
+    # diventa disponibile SOLO dalle 10:15.
+    #
+    # Spostiamo quindi il timestamp alla fine della candela.
+    # --------------------------------------------------------
+
+    rule_delta = pd.Timedelta(
+        rule
+    )
+
+    x["available_at"] = (
+        x["datetime"] +
+        rule_delta
     )
 
     x["ema20"] = ema(
@@ -378,6 +537,10 @@ def merge_trends(df):
 
     result = df.copy()
 
+    # --------------------------------------------------------
+    # 15 MIN
+    # --------------------------------------------------------
+
     trend15 = make_timeframe(
         result,
         "15min",
@@ -385,14 +548,22 @@ def merge_trends(df):
 
     trend15 = trend15[
         [
-            "datetime",
+            "available_at",
             "trend",
         ]
     ].rename(
         columns={
-            "trend": "trend15"
+            "available_at":
+                "datetime",
+
+            "trend":
+                "trend15",
         }
     )
+
+    # --------------------------------------------------------
+    # 1 HOUR
+    # --------------------------------------------------------
 
     trend1h = make_timeframe(
         result,
@@ -401,14 +572,28 @@ def merge_trends(df):
 
     trend1h = trend1h[
         [
-            "datetime",
+            "available_at",
             "trend",
         ]
     ].rename(
         columns={
-            "trend": "trend1h"
+            "available_at":
+                "datetime",
+
+            "trend":
+                "trend1h",
         }
     )
+
+    # --------------------------------------------------------
+    # MERGE
+    #
+    # allow_exact_matches=True:
+    #
+    # se siamo esattamente alle 10:15,
+    # la 15m 10:00-10:15 è appena chiusa
+    # ed è quindi utilizzabile.
+    # --------------------------------------------------------
 
     result = pd.merge_asof(
         result.sort_values(
@@ -419,6 +604,7 @@ def merge_trends(df):
         ),
         on="datetime",
         direction="backward",
+        allow_exact_matches=True,
     )
 
     result = pd.merge_asof(
@@ -430,6 +616,7 @@ def merge_trends(df):
         ),
         on="datetime",
         direction="backward",
+        allow_exact_matches=True,
     )
 
     return result
@@ -498,51 +685,21 @@ def signal_mask(
         )
 
     # --------------------------------------------------------
-    # FILTRI
+    # FILTRI V7
     # --------------------------------------------------------
 
-    if mode == "EMA_STRONG":
-
-        mask &= (
-            df["ema_gap"] >= 0.5
-        )
-
-    elif mode == "EMA_VERY_STRONG":
-
-        mask &= (
-            df["ema_gap"] >= 1.0
-        )
-
-    elif mode == "ATR_HIGH":
-
-        median_atr = (
-            df["atr_pct"]
-            .rolling(200)
-            .median()
-        )
+    if mode == "ATR_HIGH":
 
         mask &= (
             df["atr_pct"] >=
-            median_atr
-        )
-
-    elif mode == "ATR_NORMAL":
-
-        median_atr = (
-            df["atr_pct"]
-            .rolling(200)
-            .median()
-        )
-
-        mask &= (
-            df["atr_pct"] <
-            median_atr
+            df["atr_median_200"]
         )
 
     elif mode == "BODY":
 
         mask &= (
-            df["body_ratio"] >= 0.45
+            df["body_ratio"] >=
+            0.45
         )
 
     elif mode == "RSI_MID":
@@ -565,28 +722,18 @@ def signal_mask(
             required_trend
         )
 
-    elif mode == "EMA_ATR":
-
-        median_atr = (
-            df["atr_pct"]
-            .rolling(200)
-            .median()
-        )
+    elif mode == "EMA_STRONG":
 
         mask &= (
-            df["ema_gap"] >= 0.5
-        )
-
-        mask &= (
-            df["atr_pct"] <
-            median_atr
+            df["ema_gap"] >=
+            0.5
         )
 
     return mask.fillna(False)
 
 
 # ============================================================
-# PRIMO SEGNALE DI OGNI EPISODIO
+# GESTIONE EPISODI
 # ============================================================
 
 def first_in_episode(mask):
@@ -600,6 +747,92 @@ def first_in_episode(mask):
         mask &
         ~previous
     )
+
+
+def select_signals(
+    df,
+    raw_signals,
+    entry_mode,
+):
+
+    indexes = np.flatnonzero(
+        raw_signals.to_numpy()
+    )
+
+    if len(indexes) == 0:
+        return raw_signals * False
+
+    selected = []
+
+    last_selected = -10**9
+
+    for idx in indexes:
+
+        if entry_mode == "FIRST":
+
+            # Il primo segnale di ogni episodio
+            if idx == indexes[0]:
+
+                selected.append(idx)
+
+            else:
+
+                previous_idx = (
+                    indexes[
+                        np.where(
+                            indexes == idx
+                        )[0][0] - 1
+                    ]
+                )
+
+                if idx > previous_idx + 1:
+                    selected.append(idx)
+
+        elif entry_mode == "NON_OVERLAP":
+
+            if idx > last_selected:
+
+                selected.append(idx)
+
+        elif entry_mode == "COOLDOWN_30":
+
+            cooldown_bars = 6
+
+            if (
+                idx -
+                last_selected
+                >= cooldown_bars
+            ):
+                selected.append(idx)
+
+        elif entry_mode == "COOLDOWN_60":
+
+            cooldown_bars = 12
+
+            if (
+                idx -
+                last_selected
+                >= cooldown_bars
+            ):
+                selected.append(idx)
+
+        if (
+            len(selected) > 0
+            and selected[-1] == idx
+        ):
+            last_selected = idx
+
+    result = pd.Series(
+        False,
+        index=df.index,
+    )
+
+    if selected:
+        result.iloc[
+            selected
+        ] = True
+
+    return result
 
 
 # ============================================================
@@ -623,14 +856,17 @@ def simulate(
 
     for signal_index in signal_indexes:
 
-        if signal_index + 1 >= len(df):
+        if (
+            signal_index + 1
+            >= len(df)
+        ):
             continue
 
         entry_index = (
             signal_index + 1
         )
 
-        entry = float(
+        raw_entry = float(
             df.iloc[
                 entry_index
             ]["open"]
@@ -650,7 +886,19 @@ def simulate(
         ):
             continue
 
+        # ----------------------------------------------------
+        # ENTRY COST
+        #
+        # BUY: cost aumenta il prezzo di entrata
+        # SELL: cost aumenta il prezzo effettivo
+        # ----------------------------------------------------
+
         if direction == "BUY":
+
+            entry = (
+                raw_entry +
+                ENTRY_COST
+            )
 
             tp_price = (
                 entry +
@@ -664,6 +912,11 @@ def simulate(
 
         else:
 
+            entry = (
+                raw_entry -
+                ENTRY_COST
+            )
+
             tp_price = (
                 entry -
                 tp * atr_value
@@ -676,7 +929,9 @@ def simulate(
 
         candles_horizon = max(
             1,
-            int(horizon / 5),
+            int(
+                horizon / 5
+            ),
         )
 
         end_index = min(
@@ -729,8 +984,7 @@ def simulate(
                 )
 
             # ------------------------------------------------
-            # Se TP e SL vengono toccati
-            # nella stessa candela:
+            # TP + SL stessa candela
             # scelta conservativa = SL
             # ------------------------------------------------
 
@@ -771,38 +1025,75 @@ def simulate(
                 break
 
         # ----------------------------------------------------
-        # CALCOLO R
+        # EXIT COST
         # ----------------------------------------------------
 
         if result == "TP":
 
-            rr = tp / sl
+            if direction == "BUY":
+
+                exit_price -= EXIT_COST
+
+            else:
+
+                exit_price += EXIT_COST
 
         elif result == "SL":
 
-            rr = -1.0
+            if direction == "BUY":
+
+                exit_price -= EXIT_COST
+
+            else:
+
+                exit_price += EXIT_COST
 
         else:
 
             if direction == "BUY":
 
-                rr = (
-                    exit_price -
-                    entry
-                ) / (
-                    sl *
-                    atr_value
-                )
+                exit_price -= EXIT_COST
 
             else:
 
-                rr = (
-                    entry -
-                    exit_price
-                ) / (
-                    sl *
-                    atr_value
-                )
+                exit_price += EXIT_COST
+
+        # ----------------------------------------------------
+        # CALCOLO R
+        #
+        # IMPORTANTE:
+        # il denominatore è il rischio iniziale.
+        # ----------------------------------------------------
+
+        risk = (
+            sl *
+            atr_value
+        )
+
+        if risk <= 0:
+            continue
+
+        if direction == "BUY":
+
+            rr = (
+                exit_price -
+                entry
+            ) / risk
+
+        else:
+
+            rr = (
+                entry -
+                exit_price
+            ) / risk
+
+        # ----------------------------------------------------
+        # Classificazione
+        #
+        # Dopo i costi un TP può teoricamente diventare
+        # leggermente inferiore al TP nominale.
+        # Manteniamo comunque TP/SL come evento di mercato.
+        # ----------------------------------------------------
 
         trades.append(
             {
@@ -869,13 +1160,22 @@ def calculate_stats(trades):
             "DD": 0.0,
         }
 
+    trades = (
+        trades
+        .sort_values(
+            "entry_time"
+        )
+        .reset_index(
+            drop=True
+        )
+    )
+
     r = trades["R"].astype(
         float
     )
 
     wins = (
-        trades["result"] ==
-        "TP"
+        trades["R"] > 0
     ).sum()
 
     gross_profit = (
@@ -933,84 +1233,226 @@ def calculate_stats(trades):
 # SCORE ROBUSTEZZA
 # ============================================================
 
+def safe_pf(value):
+
+    if not np.isfinite(value):
+        return 10.0
+
+    return float(value)
+
+
 def robustness_score(
-    development,
-    verification,
+    dev,
+    val,
 ):
 
     if (
-        development["trades"] <
+        dev["trades"] <
         MIN_TRADES_DEV
     ):
-        return -999
+        return -9999
 
     if (
-        verification["trades"] <
-        MIN_TRADES_VER
+        val["trades"] <
+        MIN_TRADES_VAL
     ):
-        return -999
+        return -9999
 
     if (
         not np.isfinite(
-            development["PF"]
+            dev["avg_R"]
         )
         or
         not np.isfinite(
-            verification["PF"]
+            val["avg_R"]
         )
     ):
-        return -999
+        return -9999
+
+    # --------------------------------------------------------
+    # Non premiamo semplicemente il profitto.
+    #
+    # Vogliamo:
+    # - avg R positivo
+    # - PF positivo
+    # - stabilità DEV -> VAL
+    # - drawdown contenuto
+    # --------------------------------------------------------
+
+    dev_pf = safe_pf(
+        dev["PF"]
+    )
+
+    val_pf = safe_pf(
+        val["PF"]
+    )
 
     score = (
 
-        0.45 *
-        verification["total_R"]
+        # Validation conta di più
+        40.0 *
+        val["avg_R"]
 
         +
 
-        0.30 *
-        development["total_R"]
-
-        +
-
-        8.0 *
-        min(
-            verification["avg_R"],
-            0,
-        )
+        20.0 *
+        dev["avg_R"]
 
         +
 
         5.0 *
         min(
-            development["avg_R"],
-            0,
+            val_pf - 1.0,
+            2.0,
+        )
+
+        +
+
+        2.0 *
+        min(
+            dev_pf - 1.0,
+            2.0,
         )
 
         -
 
         0.10 *
-        verification["DD"]
+        val["DD"]
 
         -
 
         0.05 *
-        development["DD"]
+        dev["DD"]
     )
+
+    # Penalità se DEV è molto migliore
+    # della Validation.
+    degradation = (
+        dev["avg_R"] -
+        val["avg_R"]
+    )
+
+    if degradation > 0:
+
+        score -= (
+            10.0 *
+            degradation
+        )
 
     return score
 
 
 # ============================================================
-# MAIN
+# SPLIT TEMPORALE
+# ============================================================
+
+def add_periods(
+    trades,
+    dev_end,
+    val_end,
+):
+
+    trades = trades.copy()
+
+    trades["period"] = np.select(
+        [
+            trades["entry_time"]
+            <= dev_end,
+
+            trades["entry_time"]
+            <= val_end,
+        ],
+        [
+            "DEV",
+            "VAL",
+        ],
+        default="TEST",
+    )
+
+    return trades
+
+
+# ============================================================
+# ANALISI TEMPORALE
+# ============================================================
+
+def time_stability(
+    trades,
+    period,
+):
+
+    x = trades[
+        trades["period"] ==
+        period
+    ].copy()
+
+    if x.empty:
+        return {}
+
+    x = x.sort_values(
+        "entry_time"
+    )
+
+    midpoint = (
+        len(x) // 2
+    )
+
+    if midpoint == 0:
+        return {}
+
+    first = x.iloc[
+        :midpoint
+    ]
+
+    second = x.iloc[
+        midpoint:
+    ]
+
+    first_stats = calculate_stats(
+        first
+    )
+
+    second_stats = calculate_stats(
+        second
+    )
+
+    return {
+        "FIRST_avg_R":
+            first_stats["avg_R"],
+
+        "SECOND_avg_R":
+            second_stats["avg_R"],
+
+        "FIRST_PF":
+            first_stats["PF"],
+
+        "SECOND_PF":
+            second_stats["PF"],
+
+        "FIRST_TRADES":
+            first_stats["trades"],
+
+        "SECOND_TRADES":
+            second_stats["trades"],
+    }
+
+
+# ============================================================
+# MAIN SCANNER
 # ============================================================
 
 def main():
 
     print()
-    print("=" * 72)
-    print("BACKTEST V6 - ROBUSTNESS SCANNER")
-    print("=" * 72)
+    print("=" * 78)
+    print("BACKTEST V7 - TARGETED ROBUSTNESS VALIDATION")
+    print("=" * 78)
+    print()
+
+    print(
+        "ATTENZIONE: risultati solo DEMO/PAPER."
+    )
+
     print()
 
     # --------------------------------------------------------
@@ -1040,26 +1482,48 @@ def main():
         df
     )
 
+    # --------------------------------------------------------
+    # TIMEFRAME SUPERIORI
+    # --------------------------------------------------------
+
     df = merge_trends(
         df
     )
 
-    df = df.dropna().reset_index(
-        drop=True
+    df = (
+        df
+        .dropna()
+        .reset_index(drop=True)
     )
 
     # --------------------------------------------------------
-    # SPLIT DEVELOPMENT / VERIFICATION
+    # SPLIT 60 / 20 / 20
     # --------------------------------------------------------
 
-    split_index = int(
-        len(df) *
+    n = len(df)
+
+    dev_index = int(
+        n *
         DEV_FRAC
     )
 
-    development_end = (
+    val_index = int(
+        n *
+        (
+            DEV_FRAC +
+            VAL_FRAC
+        )
+    )
+
+    dev_end = (
         df.iloc[
-            split_index - 1
+            dev_index - 1
+        ]["datetime"]
+    )
+
+    val_end = (
+        df.iloc[
+            val_index - 1
         ]["datetime"]
     )
 
@@ -1068,84 +1532,87 @@ def main():
     )
 
     print(
-        f"fino a {development_end}"
+        f"fino a {dev_end}"
     )
 
     print()
 
     print(
-        "VERIFICA:"
+        "VALIDATION:"
     )
 
     print(
-        f"dopo {development_end}"
+        f"{dev_end} -> {val_end}"
+    )
+
+    print()
+
+    print(
+        "TEST FINALE:"
+    )
+
+    print(
+        f"dopo {val_end}"
     )
 
     print()
 
     # --------------------------------------------------------
-    # MODALITÀ
+    # SCANNER
     # --------------------------------------------------------
-
-    modes = [
-        "BASE",
-        "EMA_STRONG",
-        "EMA_VERY_STRONG",
-        "ATR_HIGH",
-        "ATR_NORMAL",
-        "BODY",
-        "RSI_MID",
-        "TREND_1H",
-        "EMA_ATR",
-    ]
 
     results = []
 
     all_trades = []
 
-    # --------------------------------------------------------
-    # SCANSIONE
-    # --------------------------------------------------------
-
     combinations = product(
-        [
-            "BUY",
-            "SELL",
-        ],
-        modes,
+        DIRECTIONS,
+        MODES,
+        ENTRY_MODES,
         TP_VALUES,
         SL_VALUES,
         HORIZONS,
     )
 
+    total_combinations = 0
+
     for (
         direction,
         mode,
+        entry_mode,
         tp,
         sl,
         horizon,
     ) in combinations:
 
-        filter_mode = (
-            "BASE"
-            if mode == "BASE"
-            else mode
-        )
+        total_combinations += 1
 
-        signals = signal_mask(
+        # ----------------------------------------------------
+        # SEGNALI
+        # ----------------------------------------------------
+
+        raw_signals = signal_mask(
             df,
             direction,
-            filter_mode,
+            mode,
         )
 
-        # Solo il primo segnale
-        # di ogni episodio continuo.
         signals = first_in_episode(
-            signals
+            raw_signals
+        )
+
+        signals = select_signals(
+            df,
+            signals,
+            entry_mode,
         )
 
         if not signals.any():
             continue
+
+        # ----------------------------------------------------
+        # TRADE
+        # ----------------------------------------------------
 
         trades = simulate(
             df,
@@ -1161,6 +1628,10 @@ def main():
 
         trades["mode"] = mode
 
+        trades["entry_mode"] = (
+            entry_mode
+        )
+
         trades["TP_ATR"] = tp
 
         trades["SL_ATR"] = sl
@@ -1169,43 +1640,75 @@ def main():
             horizon
         )
 
-        trades["period"] = np.where(
-            trades["entry_time"] <=
-            development_end,
-            "DEV",
-            "VER",
+        trades = add_periods(
+            trades,
+            dev_end,
+            val_end,
         )
 
-        development_trades = (
-            trades[
-                trades["period"] ==
-                "DEV"
-            ]
+        # ----------------------------------------------------
+        # STATISTICHE
+        # ----------------------------------------------------
+
+        dev_trades = trades[
+            trades["period"] ==
+            "DEV"
+        ]
+
+        val_trades = trades[
+            trades["period"] ==
+            "VAL"
+        ]
+
+        test_trades = trades[
+            trades["period"] ==
+            "TEST"
+        ]
+
+        dev = calculate_stats(
+            dev_trades
         )
 
-        verification_trades = (
-            trades[
-                trades["period"] ==
-                "VER"
-            ]
+        val = calculate_stats(
+            val_trades
         )
 
-        development = (
-            calculate_stats(
-                development_trades
-            )
-        )
-
-        verification = (
-            calculate_stats(
-                verification_trades
-            )
+        test = calculate_stats(
+            test_trades
         )
 
         score = robustness_score(
-            development,
-            verification,
+            dev,
+            val,
         )
+
+        # ----------------------------------------------------
+        # DEGRADATION
+        # ----------------------------------------------------
+
+        if (
+            np.isfinite(
+                dev["avg_R"]
+            )
+            and
+            np.isfinite(
+                val["avg_R"]
+            )
+            and
+            dev["avg_R"] != 0
+        ):
+
+            degradation_pct = (
+                1 -
+                (
+                    val["avg_R"] /
+                    dev["avg_R"]
+                )
+            ) * 100
+
+        else:
+
+            degradation_pct = np.nan
 
         results.append(
             {
@@ -1214,6 +1717,9 @@ def main():
 
                 "mode":
                     mode,
+
+                "entry_mode":
+                    entry_mode,
 
                 "TP_ATR":
                     tp,
@@ -1225,64 +1731,61 @@ def main():
                     horizon,
 
                 "DEV_TRADES":
-                    development[
-                        "trades"
-                    ],
+                    dev["trades"],
 
                 "DEV_WIN":
-                    development[
-                        "win"
-                    ],
+                    dev["win"],
 
                 "DEV_avg_R":
-                    development[
-                        "avg_R"
-                    ],
+                    dev["avg_R"],
 
                 "DEV_TOTAL_R":
-                    development[
-                        "total_R"
-                    ],
+                    dev["total_R"],
 
                 "DEV_PF":
-                    development[
-                        "PF"
-                    ],
+                    dev["PF"],
 
                 "DEV_DD":
-                    development[
-                        "DD"
-                    ],
+                    dev["DD"],
 
-                "VER_TRADES":
-                    verification[
-                        "trades"
-                    ],
+                "VAL_TRADES":
+                    val["trades"],
 
-                "VER_WIN":
-                    verification[
-                        "win"
-                    ],
+                "VAL_WIN":
+                    val["win"],
 
-                "VER_avg_R":
-                    verification[
-                        "avg_R"
-                    ],
+                "VAL_avg_R":
+                    val["avg_R"],
 
-                "VER_TOTAL_R":
-                    verification[
-                        "total_R"
-                    ],
+                "VAL_TOTAL_R":
+                    val["total_R"],
 
-                "VER_PF":
-                    verification[
-                        "PF"
-                    ],
+                "VAL_PF":
+                    val["PF"],
 
-                "VER_DD":
-                    verification[
-                        "DD"
-                    ],
+                "VAL_DD":
+                    val["DD"],
+
+                "TEST_TRADES":
+                    test["trades"],
+
+                "TEST_WIN":
+                    test["win"],
+
+                "TEST_avg_R":
+                    test["avg_R"],
+
+                "TEST_TOTAL_R":
+                    test["total_R"],
+
+                "TEST_PF":
+                    test["PF"],
+
+                "TEST_DD":
+                    test["DD"],
+
+                "DEV_VAL_DEGRADATION_%":
+                    degradation_pct,
 
                 "SCORE":
                     score,
@@ -1294,7 +1797,7 @@ def main():
         )
 
     # --------------------------------------------------------
-    # RISULTATI
+    # DATAFRAME RISULTATI
     # --------------------------------------------------------
 
     results_df = pd.DataFrame(
@@ -1312,13 +1815,8 @@ def main():
         ignore_index=True,
     )
 
-    results_df = results_df.sort_values(
-        "SCORE",
-        ascending=False,
-    )
-
     # --------------------------------------------------------
-    # SALVATAGGIO
+    # SALVATAGGIO COMPLETO
     # --------------------------------------------------------
 
     results_df.to_csv(
@@ -1336,145 +1834,478 @@ def main():
         index=False,
     )
 
-    # --------------------------------------------------------
-    # CANDIDATI ROBUSTI
-    # --------------------------------------------------------
+    # ========================================================
+    # CANDIDATI ROBUSTI DEV + VALIDATION
+    # ========================================================
 
-    robust_candidates = results_df[
-        (results_df["DEV_TRADES"] >= MIN_TRADES_DEV)
+    robust = results_df[
+        (results_df["DEV_TRADES"]
+         >= MIN_TRADES_DEV)
         &
-        (results_df["VER_TRADES"] >= MIN_TRADES_VER)
+        (results_df["VAL_TRADES"]
+         >= MIN_TRADES_VAL)
         &
         (results_df["DEV_avg_R"] > 0)
         &
-        (results_df["VER_avg_R"] > 0)
+        (results_df["VAL_avg_R"] > 0)
         &
         (results_df["DEV_PF"] > 1)
         &
-        (results_df["VER_PF"] > 1)
+        (results_df["VAL_PF"] > 1)
     ].copy()
 
-    robust_candidates = (
-        robust_candidates.sort_values(
+    robust = robust.sort_values(
+        [
+            "SCORE",
+            "VAL_PF",
+            "VAL_avg_R",
+        ],
+        ascending=False,
+    )
+
+    robust.to_csv(
+        f"{OUTPUT_DIR}/robust_dev_val.csv",
+        index=False,
+    )
+
+    # ========================================================
+    # TEST FINALE
+    #
+    # IL TEST NON È USATO PER SELEZIONARE.
+    # ========================================================
+
+    test_candidates = robust[
+        robust["TEST_TRADES"]
+        >= MIN_TRADES_TEST
+    ].copy()
+
+    test_candidates = (
+        test_candidates.sort_values(
             [
-                "VER_TOTAL_R",
-                "VER_PF",
-                "SCORE",
+                "TEST_avg_R",
+                "TEST_PF",
             ],
             ascending=False,
         )
     )
 
-    robust_candidates.to_csv(
-        f"{OUTPUT_DIR}/robust_candidates.csv",
+    test_candidates.to_csv(
+        f"{OUTPUT_DIR}/test_results_for_robust_candidates.csv",
         index=False,
     )
 
-    # --------------------------------------------------------
-    # STAMPA TOP ROBUSTI
-    # --------------------------------------------------------
+    # ========================================================
+    # CANDIDATO V6 SPECIFICO
+    # ========================================================
 
-    print()
-    print("=" * 72)
-    print("TOP 25 CANDIDATI ROBUSTI")
-    print("=" * 72)
-    print()
+    v6_candidate = results_df[
+        (results_df["direction"] == "BUY")
+        &
+        (results_df["mode"] == "ATR_HIGH")
+        &
+        (results_df["TP_ATR"] == 2.0)
+        &
+        (results_df["SL_ATR"] == 1.0)
+        &
+        (results_df["HORIZON_MIN"] == 60)
+    ].copy()
+
+    v6_candidate.to_csv(
+        f"{OUTPUT_DIR}/v6_candidate_check.csv",
+        index=False,
+    )
+
+    # ========================================================
+    # OUTPUT TOP DEV/VALIDATION
+    # ========================================================
 
     display_columns = [
         "direction",
         "mode",
+        "entry_mode",
         "TP_ATR",
         "SL_ATR",
         "HORIZON_MIN",
+
         "DEV_TRADES",
         "DEV_avg_R",
-        "DEV_TOTAL_R",
         "DEV_PF",
-        "VER_TRADES",
-        "VER_avg_R",
-        "VER_TOTAL_R",
-        "VER_PF",
-        "VER_DD",
+        "DEV_DD",
+
+        "VAL_TRADES",
+        "VAL_avg_R",
+        "VAL_PF",
+        "VAL_DD",
+
+        "TEST_TRADES",
+        "TEST_avg_R",
+        "TEST_PF",
+        "TEST_DD",
+
+        "SCORE",
     ]
 
-    if robust_candidates.empty:
+    print()
+    print("=" * 78)
+    print("TOP 30 DEV + VALIDATION")
+    print("=" * 78)
+    print()
+
+    if robust.empty:
 
         print(
-            "NESSUN CANDIDATO SODDISFA "
-            "TUTTI I CRITERI DI ROBUSTEZZA."
+            "NESSUN CANDIDATO SUPERA "
+            "I CRITERI DEV + VALIDATION."
         )
 
     else:
 
         print(
-            robust_candidates[
+            robust[
                 display_columns
-            ].head(25).to_string(
+            ]
+            .head(30)
+            .to_string(
                 index=False
             )
         )
 
-    # --------------------------------------------------------
-    # TOP GENERALE
-    # --------------------------------------------------------
+    # ========================================================
+    # TEST DEI CANDIDATI ROBUSTI
+    # ========================================================
 
     print()
-    print("=" * 72)
-    print("TOP 25 GENERALI")
-    print("=" * 72)
+    print("=" * 78)
+    print("TEST FINALE DEI CANDIDATI ROBUSTI")
+    print("=" * 78)
     print()
 
-    print(
-        results_df[
-            display_columns +
-            ["SCORE"]
-        ].head(25).to_string(
-            index=False
+    if test_candidates.empty:
+
+        print(
+            "Nessun candidato robusto ha "
+            "abbastanza trade nel TEST."
         )
+
+    else:
+
+        print(
+            test_candidates[
+                display_columns
+            ]
+            .head(30)
+            .to_string(
+                index=False
+            )
+        )
+
+    # ========================================================
+    # CHECK CANDIDATO V6
+    # ========================================================
+
+    print()
+    print("=" * 78)
+    print("CHECK CANDIDATO V6")
+    print("=" * 78)
+    print()
+
+    if v6_candidate.empty:
+
+        print(
+            "Candidato V6 non trovato."
+        )
+
+    else:
+
+        print(
+            v6_candidate[
+                display_columns
+            ]
+            .to_string(
+                index=False
+            )
+        )
+
+    # ========================================================
+    # SENSITIVITY DEL CANDIDATO V6
+    # ========================================================
+
+    print()
+    print("=" * 78)
+    print("SENSITIVITY BUY + ATR_HIGH + 60m")
+    print("=" * 78)
+    print()
+
+    sensitivity_results = []
+
+    for tp in SENSITIVITY_TP:
+
+        for sl in SENSITIVITY_SL:
+
+            raw = signal_mask(
+                df,
+                "BUY",
+                "ATR_HIGH",
+            )
+
+            raw = first_in_episode(
+                raw
+            )
+
+            selected = select_signals(
+                df,
+                raw,
+                "NON_OVERLAP",
+            )
+
+            trades = simulate(
+                df,
+                selected,
+                "BUY",
+                tp,
+                sl,
+                60,
+            )
+
+            if trades.empty:
+                continue
+
+            trades = add_periods(
+                trades,
+                dev_end,
+                val_end,
+            )
+
+            dev = calculate_stats(
+                trades[
+                    trades["period"] ==
+                    "DEV"
+                ]
+            )
+
+            val = calculate_stats(
+                trades[
+                    trades["period"] ==
+                    "VAL"
+                ]
+            )
+
+            test = calculate_stats(
+                trades[
+                    trades["period"] ==
+                    "TEST"
+                ]
+            )
+
+            sensitivity_results.append(
+                {
+                    "TP_ATR":
+                        tp,
+
+                    "SL_ATR":
+                        sl,
+
+                    "DEV_TRADES":
+                        dev["trades"],
+
+                    "DEV_avg_R":
+                        dev["avg_R"],
+
+                    "DEV_PF":
+                        dev["PF"],
+
+                    "VAL_TRADES":
+                        val["trades"],
+
+                    "VAL_avg_R":
+                        val["avg_R"],
+
+                    "VAL_PF":
+                        val["PF"],
+
+                    "TEST_TRADES":
+                        test["trades"],
+
+                    "TEST_avg_R":
+                        test["avg_R"],
+
+                    "TEST_PF":
+                        test["PF"],
+                }
+            )
+
+    sensitivity_df = pd.DataFrame(
+        sensitivity_results
     )
 
-    # --------------------------------------------------------
-    # RIEPILOGO
-    # --------------------------------------------------------
+    if not sensitivity_df.empty:
+
+        sensitivity_df.to_csv(
+            f"{OUTPUT_DIR}/sensitivity_atr_high.csv",
+            index=False,
+        )
+
+        print(
+            sensitivity_df.to_string(
+                index=False
+            )
+        )
+
+    # ========================================================
+    # STABILITÀ TEMPORALE
+    # ========================================================
 
     print()
-    print("=" * 72)
+    print("=" * 78)
+    print("STABILITÀ TEMPORALE TOP CANDIDATI")
+    print("=" * 78)
+    print()
+
+    stability_rows = []
+
+    for _, row in robust.head(20).iterrows():
+
+        mask = (
+            (trades_df["direction"]
+             == row["direction"])
+            &
+            (trades_df["mode"]
+             == row["mode"])
+            &
+            (trades_df["entry_mode"]
+             == row["entry_mode"])
+            &
+            (trades_df["TP_ATR"]
+             == row["TP_ATR"])
+            &
+            (trades_df["SL_ATR"]
+             == row["SL_ATR"])
+            &
+            (trades_df["HORIZON_MIN"]
+             == row["HORIZON_MIN"])
+        )
+
+        candidate_trades = trades_df[
+            mask
+        ].copy()
+
+        stability = time_stability(
+            candidate_trades,
+            "VAL",
+        )
+
+        if stability:
+
+            stability_rows.append(
+                {
+                    "direction":
+                        row["direction"],
+
+                    "mode":
+                        row["mode"],
+
+                    "entry_mode":
+                        row["entry_mode"],
+
+                    "TP_ATR":
+                        row["TP_ATR"],
+
+                    "SL_ATR":
+                        row["SL_ATR"],
+
+                    "HORIZON_MIN":
+                        row["HORIZON_MIN"],
+
+                    **stability,
+                }
+            )
+
+    stability_df = pd.DataFrame(
+        stability_rows
+    )
+
+    if not stability_df.empty:
+
+        stability_df.to_csv(
+            f"{OUTPUT_DIR}/temporal_stability.csv",
+            index=False,
+        )
+
+        print(
+            stability_df.to_string(
+                index=False
+            )
+        )
+
+    # ========================================================
+    # RIEPILOGO
+    # ========================================================
+
+    print()
+    print("=" * 78)
     print("COMPLETATO")
-    print("=" * 72)
+    print("=" * 78)
+    print()
 
     print(
         f"Combinazioni analizzate: "
+        f"{total_combinations}"
+    )
+
+    print(
+        f"Risultati validi: "
         f"{len(results_df)}"
     )
 
     print(
-        f"Candidati robusti: "
-        f"{len(robust_candidates)}"
+        f"Candidati robusti DEV+VAL: "
+        f"{len(robust)}"
+    )
+
+    print(
+        f"Candidati arrivati al TEST: "
+        f"{len(test_candidates)}"
     )
 
     print()
     print(
-        f"File risultati: "
-        f"{OUTPUT_DIR}/"
+        f"Output: {OUTPUT_DIR}/"
     )
 
     print(
-        f"- scan_all.csv"
+        "- scan_all.csv"
     )
 
     print(
-        f"- robust_candidates.csv"
+        "- robust_dev_val.csv"
     )
 
     print(
-        f"- trades_all.csv"
+        "- test_results_for_robust_candidates.csv"
     )
 
     print(
-        f"- candles_with_indicators.csv"
+        "- v6_candidate_check.csv"
     )
 
-    print("=" * 72)
+    print(
+        "- sensitivity_atr_high.csv"
+    )
+
+    print(
+        "- temporal_stability.csv"
+    )
+
+    print(
+        "- trades_all.csv"
+    )
+
+    print(
+        "- candles_with_indicators.csv"
+    )
+
+    print()
+    print("=" * 78)
 
 
 # ============================================================
