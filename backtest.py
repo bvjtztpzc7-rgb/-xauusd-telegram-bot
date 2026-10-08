@@ -1,9 +1,7 @@
 import os
 import time
-import math
 import warnings
 import requests
-
 import numpy as np
 import pandas as pd
 
@@ -11,7 +9,8 @@ warnings.filterwarnings("ignore")
 
 
 # ============================================================
-# CONFIGURAZIONE
+# V10 — AGGRESSIVE BUT PRUDENT
+# TREND + BREAKOUT + MOMENTUM
 # ============================================================
 
 SYMBOL = "XAU/USD"
@@ -20,267 +19,123 @@ INTERVAL = "5min"
 API_KEY = os.getenv("TWELVE_DATA_API_KEY")
 
 if not API_KEY:
-    raise RuntimeError(
-        "ERRORE: TWELVE_DATA_API_KEY non configurato."
-    )
-
-OUTPUT_DIR = "backtest_results_v9_1"
-os.makedirs(OUTPUT_DIR, exist_ok=True)
-
-RESULTS_FILE = os.path.join(
-    OUTPUT_DIR,
-    "v9_1_results.csv"
-)
-
-ROBUST_FILE = os.path.join(
-    OUTPUT_DIR,
-    "v9_1_robust.csv"
-)
-
-N_CANDLES = 5000
+    raise RuntimeError("TWELVE_DATA_API_KEY non configurato")
 
 
 # ============================================================
-# COSTI
+# PARAMETRI FISSI V10
 # ============================================================
 
-SPREAD = 0.05
-SLIPPAGE = 0.05
+EMA_FAST = 20
+EMA_MID = 50
+EMA_SLOW = 100
 
-ENTRY_COST = SPREAD + SLIPPAGE
-EXIT_COST = SPREAD + SLIPPAGE
+BREAKOUT_LOOKBACK = 24
 
+BODY_RATIO_MIN = 0.60
+CLOSE_LOCATION_MAX = 0.20
 
-# ============================================================
-# SPLIT
-# ============================================================
+MOMENTUM_ATR_MIN = 0.25
 
-DEV_PCT = 0.60
-VAL_PCT = 0.20
-TEST_PCT = 0.20
+ATR_PERIOD = 14
+ATR_AVG_PERIOD = 50
 
+RSI_PERIOD = 14
 
-# ============================================================
-# GRIGLIA V9.1
-#
-# Intenzionalmente mirata.
-# ============================================================
+BUY_RSI_MIN = 52
+BUY_RSI_MAX = 68
 
-BODY_RATIOS = [
-    0.45,
-    0.50,
-    0.55,
-    0.60,
-    0.65,
-    0.70,
-]
+SELL_RSI_MIN = 32
+SELL_RSI_MAX = 48
 
-CLOSE_LOCATION_MAX = [
-    0.20,
-    0.30,
-]
+EMA_GAP_ATR_MIN = 0.15
 
-EMA_GAP_MIN = [
-    0.00,
-    0.10,
-]
+SL_ATR = 1.00
+TP_ATR = 2.50
 
-MOM_ATR_MIN = [
-    0.00,
-    0.10,
-]
+HORIZON_MIN = 60
 
-RSI_RANGES = [
-    (30, 65),
-    (35, 65),
-]
+COOLDOWN_MIN = 60
 
-TP_VALUES = [
-    2.00,
-    2.25,
-    2.50,
-    2.75,
-]
+# Costi totali stimati:
+# spread + slippage
+ROUND_TRIP_COST = 0.10
 
-SL_VALUES = [
-    1.00,
-    1.25,
-    1.50,
-]
-
-HORIZONS = [
-    30,
-    60,
-]
-
-COOLDOWNS = [
-    30,
-    60,
-]
+OUTPUT_FILE = "backtest_results_v10.csv"
 
 
 # ============================================================
-# DOWNLOAD
+# DOWNLOAD DATI
 # ============================================================
 
 def download_data():
-
-    print("=" * 78)
-    print("V9.1 - DOWNLOAD DATI")
-    print("=" * 78)
 
     url = "https://api.twelvedata.com/time_series"
 
     params = {
         "symbol": SYMBOL,
         "interval": INTERVAL,
-        "outputsize": N_CANDLES,
+        "outputsize": 5000,
         "apikey": API_KEY,
         "timezone": "UTC",
-        "order": "ASC",
+        "order": "ASC"
     }
 
-    try:
+    print("=" * 78)
+    print("V10 — AGGRESSIVE BUT PRUDENT")
+    print("=" * 78)
 
-        response = requests.get(
-            url,
-            params=params,
-            timeout=30,
-        )
+    print("\nDownload dati Twelve Data...")
 
-        print(
-            f"HTTP status: {response.status_code}"
-        )
+    response = requests.get(
+        url,
+        params=params,
+        timeout=30
+    )
 
-        response.raise_for_status()
+    response.raise_for_status()
 
-        data = response.json()
-
-    except requests.exceptions.RequestException as e:
-
-        print()
-        print("=" * 78)
-        print("ERRORE RICHIESTA TWELVE DATA")
-        print("=" * 78)
-        print(str(e))
-        print("=" * 78)
-
-        raise
-
-    except ValueError as e:
-
-        print()
-        print("=" * 78)
-        print("ERRORE RISPOSTA JSON")
-        print("=" * 78)
-        print(str(e))
-        print()
-        print("Risposta ricevuta:")
-        print(response.text[:3000])
-        print("=" * 78)
-
-        raise
-
-    print("Risposta Twelve Data ricevuta.")
-
-    if "status" in data:
-        print(
-            f"API status : {data.get('status')}"
-        )
-
-    if "code" in data:
-        print(
-            f"API code   : {data.get('code')}"
-        )
-
-    if "message" in data:
-        print(
-            f"API message: {data.get('message')}"
-        )
+    data = response.json()
 
     if "values" not in data:
-
-        print()
-        print("=" * 78)
-        print("ERRORE: NESSUN CAMPO 'values'")
-        print("=" * 78)
-        print(data)
-        print("=" * 78)
-
         raise RuntimeError(
-            "Twelve Data non ha restituito candele."
+            f"Errore Twelve Data:\n{data}"
         )
 
     df = pd.DataFrame(data["values"])
 
     if df.empty:
-        raise RuntimeError(
-            "Twelve Data ha restituito zero candele."
-        )
-
-    required = [
-        "datetime",
-        "open",
-        "high",
-        "low",
-        "close",
-    ]
-
-    missing = [
-        x for x in required
-        if x not in df.columns
-    ]
-
-    if missing:
-        raise RuntimeError(
-            f"Colonne mancanti: {missing}"
-        )
+        raise RuntimeError("Nessun dato ricevuto.")
 
     df["datetime"] = pd.to_datetime(
         df["datetime"],
-        utc=True,
+        utc=True
     )
 
-    for col in [
+    df = df.sort_values("datetime").reset_index(drop=True)
+
+    numeric_cols = [
         "open",
         "high",
         "low",
-        "close",
-    ]:
+        "close"
+    ]
+
+    for col in numeric_cols:
         df[col] = pd.to_numeric(
             df[col],
-            errors="coerce",
+            errors="coerce"
         )
 
-    df = (
-        df[
-            [
-                "datetime",
-                "open",
-                "high",
-                "low",
-                "close",
-            ]
-        ]
-        .dropna()
-        .sort_values("datetime")
-        .drop_duplicates("datetime")
-        .reset_index(drop=True)
-    )
+    df = df.dropna(
+        subset=numeric_cols
+    ).reset_index(drop=True)
+
+    print(f"Candele scaricate: {len(df)}")
 
     print(
-        f"Candele scaricate: {len(df)}"
-    )
-
-    if len(df) < 3000:
-        raise RuntimeError(
-            f"Troppi pochi dati: {len(df)}"
-        )
-
-    print(
-        "Periodo:"
-        f" {df['datetime'].iloc[0]}"
-        f" -> "
+        f"Periodo: "
+        f"{df['datetime'].iloc[0]} -> "
         f"{df['datetime'].iloc[-1]}"
     )
 
@@ -291,1559 +146,564 @@ def download_data():
 # INDICATORI
 # ============================================================
 
-def ema(series, period):
+def calculate_indicators(df):
 
-    return series.ewm(
-        span=period,
-        adjust=False,
-        min_periods=period,
+    df = df.copy()
+
+    # --------------------------------------------------------
+    # EMA
+    # --------------------------------------------------------
+
+    df["ema20"] = df["close"].ewm(
+        span=EMA_FAST,
+        adjust=False
     ).mean()
 
+    df["ema50"] = df["close"].ewm(
+        span=EMA_MID,
+        adjust=False
+    ).mean()
 
-def rsi(series, period=14):
+    df["ema100"] = df["close"].ewm(
+        span=EMA_SLOW,
+        adjust=False
+    ).mean()
 
-    delta = series.diff()
+    # --------------------------------------------------------
+    # TRUE RANGE
+    # --------------------------------------------------------
+
+    prev_close = df["close"].shift(1)
+
+    tr1 = df["high"] - df["low"]
+
+    tr2 = (df["high"] - prev_close).abs()
+
+    tr3 = (df["low"] - prev_close).abs()
+
+    df["tr"] = pd.concat(
+        [tr1, tr2, tr3],
+        axis=1
+    ).max(axis=1)
+
+    # --------------------------------------------------------
+    # ATR — Wilder style
+    # --------------------------------------------------------
+
+    df["atr"] = df["tr"].ewm(
+        alpha=1 / ATR_PERIOD,
+        adjust=False
+    ).mean()
+
+    df["atr_avg50"] = df["atr"].rolling(
+        ATR_AVG_PERIOD
+    ).mean()
+
+    # --------------------------------------------------------
+    # MOM6
+    # --------------------------------------------------------
+
+    df["mom6"] = (
+        df["close"] -
+        df["close"].shift(6)
+    )
+
+    # --------------------------------------------------------
+    # RSI
+    # --------------------------------------------------------
+
+    delta = df["close"].diff()
 
     gain = delta.clip(lower=0)
     loss = -delta.clip(upper=0)
 
     avg_gain = gain.ewm(
-        alpha=1 / period,
-        adjust=False,
-        min_periods=period,
+        alpha=1 / RSI_PERIOD,
+        adjust=False
     ).mean()
 
     avg_loss = loss.ewm(
-        alpha=1 / period,
-        adjust=False,
-        min_periods=period,
+        alpha=1 / RSI_PERIOD,
+        adjust=False
     ).mean()
 
-    rs = (
-        avg_gain /
-        avg_loss.replace(0, np.nan)
+    rs = avg_gain / avg_loss.replace(
+        0,
+        np.nan
     )
 
-    return 100 - (
+    df["rsi"] = 100 - (
         100 / (1 + rs)
     )
 
-
-def atr(df, period=14):
-
-    previous_close = df["close"].shift(1)
-
-    tr1 = (
-        df["high"] -
-        df["low"]
-    )
-
-    tr2 = (
-        df["high"] -
-        previous_close
-    ).abs()
-
-    tr3 = (
-        df["low"] -
-        previous_close
-    ).abs()
-
-    true_range = pd.concat(
-        [
-            tr1,
-            tr2,
-            tr3,
-        ],
-        axis=1,
-    ).max(axis=1)
-
-    return true_range.ewm(
-        alpha=1 / period,
-        adjust=False,
-        min_periods=period,
-    ).mean()
-
-
-def macd(series):
-
-    ema12 = ema(
-        series,
-        12,
-    )
-
-    ema26 = ema(
-        series,
-        26,
-    )
-
-    line = ema12 - ema26
-
-    signal = line.ewm(
-        span=9,
-        adjust=False,
-        min_periods=9,
-    ).mean()
-
-    return line, signal
-
-
-# ============================================================
-# INDICATORI 5M
-# ============================================================
-
-def prepare_5m(df):
-
-    df = df.copy()
-
-    df["ema20"] = ema(
-        df["close"],
-        20,
-    )
-
-    df["ema50"] = ema(
-        df["close"],
-        50,
-    )
-
-    df["ema100"] = ema(
-        df["close"],
-        100,
-    )
-
-    (
-        df["macd"],
-        df["macd_signal"],
-    ) = macd(
-        df["close"]
-    )
-
-    df["rsi"] = rsi(
-        df["close"],
-        14,
-    )
-
-    df["atr"] = atr(
-        df,
-        14,
-    )
-
-    # 6 candele 5m = 30 minuti
-    df["mom6"] = (
-        df["close"] -
-        df["close"].shift(6)
-    )
+    # --------------------------------------------------------
+    # Candle body
+    # --------------------------------------------------------
 
     candle_range = (
         df["high"] -
         df["low"]
     )
 
-    candle_range = candle_range.replace(
-        0,
-        np.nan,
-    )
-
-    body = (
+    df["body"] = (
         df["close"] -
         df["open"]
     ).abs()
 
     df["body_ratio"] = (
-        body /
-        candle_range
+        df["body"] /
+        candle_range.replace(0, np.nan)
     )
 
-    # 0 = chiusura sul minimo
-    # 1 = chiusura sul massimo
-    df["close_location"] = (
+    # --------------------------------------------------------
+    # Close location
+    #
+    # BUY:
+    # close nel 20% superiore
+    #
+    # SELL:
+    # close nel 20% inferiore
+    # --------------------------------------------------------
+
+    df["close_position"] = (
         df["close"] -
         df["low"]
-    ) / candle_range
+    ) / candle_range.replace(
+        0,
+        np.nan
+    )
 
-    # Per SELL:
-    # EMA50 - EMA20 > 0
-    # maggiore = trend più distanziato
+    # --------------------------------------------------------
+    # BREAKOUT LEVEL
+    #
+    # IMPORTANTISSIMO:
+    # shift(1) = non usa la candela corrente.
+    #
+    # Quindi non c'è lookahead.
+    # --------------------------------------------------------
+
+    df["previous_high"] = (
+        df["high"]
+        .rolling(BREAKOUT_LOOKBACK)
+        .max()
+        .shift(1)
+    )
+
+    df["previous_low"] = (
+        df["low"]
+        .rolling(BREAKOUT_LOOKBACK)
+        .min()
+        .shift(1)
+    )
+
+    # --------------------------------------------------------
+    # EMA DISTANCE NORMALIZED BY ATR
+    # --------------------------------------------------------
+
     df["ema_gap_atr"] = (
-        (
-            df["ema50"] -
-            df["ema20"]
-        ) /
-        df["atr"]
+        (df["ema20"] - df["ema50"]) /
+        df["atr"].replace(0, np.nan)
     )
 
-    # Per SELL:
-    # MOM6 negativo.
-    # Qui trasformato in forza positiva.
-    df["mom_atr"] = (
-        -df["mom6"] /
-        df["atr"]
-    )
+    # --------------------------------------------------------
+    # 15 MIN TREND
+    #
+    # Costruiamo candele 15m.
+    # La candela 15m diventa disponibile
+    # SOLO dopo la sua chiusura.
+    # --------------------------------------------------------
 
-    return df
+    temp = df.set_index("datetime")
 
-
-# ============================================================
-# 15M - NO LEAKAGE
-# ============================================================
-
-def prepare_15m(df):
-
-    x = df.set_index(
-        "datetime"
-    )[
-        [
-            "open",
-            "high",
-            "low",
-            "close",
-        ]
-    ]
-
-    tf = x.resample(
+    tf15 = temp.resample(
         "15min",
         label="left",
-        closed="left",
-    ).agg(
-        {
-            "open": "first",
-            "high": "max",
-            "low": "min",
-            "close": "last",
-        }
-    ).dropna()
+        closed="left"
+    ).agg({
+        "open": "first",
+        "high": "max",
+        "low": "min",
+        "close": "last"
+    })
 
-    tf["ema20"] = ema(
-        tf["close"],
-        20,
+    tf15 = tf15.dropna()
+
+    tf15["ema20_15"] = tf15["close"].ewm(
+        span=20,
+        adjust=False
+    ).mean()
+
+    tf15["ema50_15"] = tf15["close"].ewm(
+        span=50,
+        adjust=False
+    ).mean()
+
+    tf15["trend15"] = np.where(
+        tf15["ema20_15"] >
+        tf15["ema50_15"],
+        "BULLISH",
+        "BEARISH"
     )
 
-    tf["ema50"] = ema(
-        tf["close"],
-        50,
-    )
-
-    tf["trend_bearish"] = (
-        tf["ema20"] <
-        tf["ema50"]
-    )
-
-    # La candela 15m diventa disponibile
-    # solo dopo 15 minuti.
-    tf["available_at"] = (
-        tf.index +
+    # La candela 15m iniziata alle 10:00
+    # è disponibile alle 10:15.
+    tf15["available_at"] = (
+        tf15.index +
         pd.Timedelta(minutes=15)
     )
 
-    return tf.reset_index()[
+    tf15 = tf15[
         [
             "available_at",
-            "trend_bearish",
+            "trend15"
         ]
-    ]
+    ].sort_values("available_at")
 
-
-def merge_15m(df5, df15):
-
-    left = df5.sort_values(
+    base = df.sort_values(
         "datetime"
     ).copy()
 
-    right = df15.sort_values(
-        "available_at"
-    ).copy()
-
-    right = right.rename(
-        columns={
-            "trend_bearish":
-            "trend15_bearish"
-        }
+    # Entry sulla chiusura della candela 5m.
+    base["entry_time"] = (
+        base["datetime"] +
+        pd.Timedelta(minutes=5)
     )
 
-    merged = pd.merge_asof(
-        left,
-        right,
-        left_on="datetime",
+    base = pd.merge_asof(
+        base.sort_values("entry_time"),
+        tf15.sort_values("available_at"),
+        left_on="entry_time",
         right_on="available_at",
-        direction="backward",
-        allow_exact_matches=True,
+        direction="backward"
     )
 
-    return merged
+    base = base.drop(
+        columns=["available_at"],
+        errors="ignore"
+    )
+
+    return base
 
 
 # ============================================================
-# PREPARAZIONE COMPLETA
+# GENERAZIONE SEGNALI
 # ============================================================
 
-def prepare_data(df):
+def generate_signal(row):
 
-    print()
-    print("=" * 78)
-    print("PREPARAZIONE DATI")
-    print("=" * 78)
+    required = [
+        "ema20",
+        "ema50",
+        "ema100",
+        "atr",
+        "atr_avg50",
+        "mom6",
+        "rsi",
+        "body_ratio",
+        "close_position",
+        "previous_high",
+        "previous_low",
+        "ema_gap_atr",
+        "trend15"
+    ]
 
-    df = prepare_5m(df)
+    for col in required:
 
-    df15 = prepare_15m(
-        df
+        if pd.isna(row[col]):
+            return None
+
+    # ========================================================
+    # BUY
+    # ========================================================
+
+    buy = (
+
+        # Trend principale
+        row["ema20"] >
+        row["ema50"] >
+
+        row["ema100"]
+
+        # EMA20 sufficientemente distante
+        and row["ema_gap_atr"] >=
+        EMA_GAP_ATR_MIN
+
+        # Trend 15m
+        and row["trend15"] ==
+        "BULLISH"
+
+        # Breakout
+        and row["close"] >
+        row["previous_high"]
+
+        # Candela forte
+        and row["body_ratio"] >=
+        BODY_RATIO_MIN
+
+        # Chiusura nel 20% superiore
+        and row["close_position"] >=
+        (1 - CLOSE_LOCATION_MAX)
+
+        # Momentum
+        and row["mom6"] >=
+        MOMENTUM_ATR_MIN *
+        row["atr"]
+
+        # Volatilità sufficiente
+        and row["atr"] >
+        row["atr_avg50"]
+
+        # RSI
+        and row["rsi"] >=
+        BUY_RSI_MIN
+
+        and row["rsi"] <=
+        BUY_RSI_MAX
     )
 
-    df = merge_15m(
-        df,
-        df15,
+    if buy:
+        return "BUY"
+
+    # ========================================================
+    # SELL
+    # ========================================================
+
+    sell = (
+
+        # Trend principale
+        row["ema20"] <
+        row["ema50"] <
+        row["ema100"]
+
+        # EMA20 sufficientemente distante
+        and row["ema_gap_atr"] <=
+        -EMA_GAP_ATR_MIN
+
+        # Trend 15m
+        and row["trend15"] ==
+        "BEARISH"
+
+        # Breakout
+        and row["close"] <
+        row["previous_low"]
+
+        # Candela forte
+        and row["body_ratio"] >=
+        BODY_RATIO_MIN
+
+        # Chiusura nel 20% inferiore
+        and row["close_position"] <=
+        CLOSE_LOCATION_MAX
+
+        # Momentum
+        and row["mom6"] <=
+        -MOMENTUM_ATR_MIN *
+        row["atr"]
+
+        # Volatilità sufficiente
+        and row["atr"] >
+        row["atr_avg50"]
+
+        # RSI
+        and row["rsi"] >=
+        SELL_RSI_MIN
+
+        and row["rsi"] <=
+        SELL_RSI_MAX
     )
 
-    # Eliminiamo le righe senza indicatori completi.
-    df = df.dropna(
-        subset=[
-            "ema20",
-            "ema50",
-            "ema100",
-            "macd",
-            "macd_signal",
-            "rsi",
-            "atr",
-            "mom6",
-            "body_ratio",
-            "close_location",
-            "ema_gap_atr",
-            "mom_atr",
-            "trend15_bearish",
-        ]
-    ).reset_index(
-        drop=True
-    )
+    if sell:
+        return "SELL"
 
-    print(
-        f"Candele utilizzabili: {len(df)}"
-    )
-
-    return df
-
-
-# ============================================================
-# SPLIT
-# ============================================================
-
-def split_data(df):
-
-    n = len(df)
-
-    dev_end = int(
-        n * DEV_PCT
-    )
-
-    val_end = int(
-        n *
-        (DEV_PCT + VAL_PCT)
-    )
-
-    dev = df.iloc[
-        :dev_end
-    ].copy()
-
-    val = df.iloc[
-        dev_end:val_end
-    ].copy()
-
-    test = df.iloc[
-        val_end:
-    ].copy()
-
-    print()
-    print("=" * 78)
-    print("SPLIT DEV / VAL / TEST")
-    print("=" * 78)
-
-    print(
-        f"DEV : {len(dev):5d} | "
-        f"{dev['datetime'].iloc[0]} -> "
-        f"{dev['datetime'].iloc[-1]}"
-    )
-
-    print(
-        f"VAL : {len(val):5d} | "
-        f"{val['datetime'].iloc[0]} -> "
-        f"{val['datetime'].iloc[-1]}"
-    )
-
-    print(
-        f"TEST: {len(test):5d} | "
-        f"{test['datetime'].iloc[0]} -> "
-        f"{test['datetime'].iloc[-1]}"
-    )
-
-    return dev, val, test
-
-
-# ============================================================
-# PRE-CALCO DELLE FINESTRE FUTURE
-# ============================================================
-
-def add_future_arrays(df):
-
-    """
-    Prepara le informazioni future necessarie
-    per velocizzare enormemente il backtest.
-
-    Non anticipa il futuro nel segnale:
-    queste informazioni vengono usate SOLO
-    dalla simulazione dopo l'ingresso.
-    """
-
-    df = df.copy()
-
-    max_bars = (
-        max(HORIZONS) //
-        5
-    )
-
-    highs = (
-        df["high"]
-        .to_numpy(dtype=float)
-    )
-
-    lows = (
-        df["low"]
-        .to_numpy(dtype=float)
-    )
-
-    closes = (
-        df["close"]
-        .to_numpy(dtype=float)
-    )
-
-    n = len(df)
-
-    future_high = np.full(
-        (max_bars, n),
-        np.nan,
-    )
-
-    future_low = np.full(
-        (max_bars, n),
-        np.nan,
-    )
-
-    future_close = np.full(
-        (max_bars, n),
-        np.nan,
-    )
-
-    for k in range(
-        1,
-        max_bars + 1,
-    ):
-
-        future_high[
-            k - 1,
-            :-k
-        ] = highs[k:]
-
-        future_low[
-            k - 1,
-            :-k
-        ] = lows[k:]
-
-        future_close[
-            k - 1,
-            :-k
-        ] = closes[k:]
-
-    return (
-        df,
-        future_high,
-        future_low,
-        future_close,
-    )
+    return None
 
 
 # ============================================================
-# SIGNAL MASK
+# TRADE SIMULATION
 # ============================================================
 
-def signal_mask(
-    df,
-    body_ratio,
-    close_location,
-    ema_gap,
-    mom_atr,
-    rsi_low,
-    rsi_high,
-):
+def simulate_trade(df, entry_index, direction):
 
-    mask = (
-        (df["ema20"] < df["ema50"])
-        &
-        (df["ema50"] < df["ema100"])
-        &
-        (df["macd"] < df["macd_signal"])
-        &
-        (df["rsi"] >= rsi_low)
-        &
-        (df["rsi"] <= rsi_high)
-        &
-        (df["mom_atr"] >= mom_atr)
-        &
-        (df["body_ratio"] >= body_ratio)
-        &
-        (df["close_location"] <= close_location)
-        &
-        (df["ema_gap_atr"] >= ema_gap)
-        &
-        (df["trend15_bearish"] == True)
+    entry_row = df.iloc[entry_index]
+
+    entry_price = float(
+        entry_row["close"]
     )
 
-    return mask.to_numpy(
-        dtype=bool
+    atr = float(
+        entry_row["atr"]
     )
 
+    if not np.isfinite(atr) or atr <= 0:
+        return None
 
-# ============================================================
-# SIMULAZIONE VELOCE
-# ============================================================
-
-def simulate_fast(
-    df,
-    mask,
-    future_high,
-    future_low,
-    future_close,
-    tp_atr,
-    sl_atr,
-    horizon,
-    cooldown,
-):
-
-    indices = np.flatnonzero(
-        mask
-    )
-
-    if len(indices) == 0:
-        return np.empty(
-            0,
-            dtype=float
-        )
-
-    horizon_bars = (
-        horizon // 5
-    )
-
-    times = (
-        df["datetime"]
-        .to_numpy()
-    )
-
-    closes = (
-        df["close"]
-        .to_numpy(dtype=float)
-    )
-
-    atr_values = (
-        df["atr"]
-        .to_numpy(dtype=float)
-    )
-
-    results = []
-
-    last_signal_idx = -10**9
-
-    for idx in indices:
-
-        # Cooldown in barre.
-        bars_since = (
-            idx -
-            last_signal_idx
-        )
-
-        if bars_since * 5 < cooldown:
-            continue
-
-        entry = closes[idx]
-        atr_value = atr_values[idx]
-
-        if (
-            not np.isfinite(entry)
-            or
-            not np.isfinite(atr_value)
-            or
-            atr_value <= 0
-        ):
-            continue
-
-        sl_distance = (
-            sl_atr *
-            atr_value
-        )
-
-        tp_distance = (
-            tp_atr *
-            atr_value
-        )
-
-        effective_entry = (
-            entry +
-            ENTRY_COST
-        )
+    if direction == "BUY":
 
         sl = (
-            effective_entry +
-            sl_distance
+            entry_price -
+            SL_ATR * atr
         )
 
         tp = (
-            effective_entry -
-            tp_distance
+            entry_price +
+            TP_ATR * atr
         )
 
-        # ----------------------------------------------------
-        # FUTURO
-        # ----------------------------------------------------
+    else:
 
-        end = min(
-            horizon_bars,
-            len(future_high)
+        sl = (
+            entry_price +
+            SL_ATR * atr
         )
 
-        highs = future_high[
-            :end,
-            idx
-        ]
+        tp = (
+            entry_price -
+            TP_ATR * atr
+        )
 
-        lows = future_low[
-            :end,
-            idx
-        ]
+    horizon_bars = HORIZON_MIN // 5
 
-        closes_future = future_close[
-            :end,
-            idx
-        ]
+    last_index = min(
+        len(df) - 1,
+        entry_index + horizon_bars
+    )
 
-        if len(highs) == 0:
-            continue
+    exit_index = last_index
+    exit_price = float(
+        df.iloc[last_index]["close"]
+    )
 
-        outcome = None
-        exit_price = None
+    result = "TIMEOUT"
 
-        for k in range(
-            len(highs)
-        ):
+    # ========================================================
+    # SCANSIONE FUTURE CANDLE
+    # ========================================================
 
-            hit_sl = (
-                highs[k] >= sl
-            )
+    for j in range(
+        entry_index + 1,
+        last_index + 1
+    ):
 
-            hit_tp = (
-                lows[k] <= tp
-            )
+        candle = df.iloc[j]
 
-            # Conservative:
-            # se entrambi nella stessa candela,
-            # consideriamo SL.
+        high = float(
+            candle["high"]
+        )
+
+        low = float(
+            candle["low"]
+        )
+
+        if direction == "BUY":
+
+            hit_sl = low <= sl
+            hit_tp = high >= tp
+
+            # Se SL e TP vengono toccati
+            # nella stessa candela:
+            # scelta conservativa -> SL.
             if hit_sl and hit_tp:
 
-                outcome = "SL"
+                exit_index = j
                 exit_price = sl
+                result = "SL"
                 break
 
             if hit_sl:
 
-                outcome = "SL"
+                exit_index = j
                 exit_price = sl
+                result = "SL"
                 break
 
             if hit_tp:
 
-                outcome = "TP"
+                exit_index = j
                 exit_price = tp
+                result = "TP"
                 break
-
-        # ----------------------------------------------------
-        # TIME EXIT
-        # ----------------------------------------------------
-
-        if outcome is None:
-
-            valid_close = (
-                closes_future[
-                    ~np.isnan(
-                        closes_future
-                    )
-                ]
-            )
-
-            if len(valid_close) == 0:
-                continue
-
-            exit_price = (
-                valid_close[-1]
-            )
-
-            outcome = "TIME"
-
-        # ----------------------------------------------------
-        # R
-        # ----------------------------------------------------
-
-        if outcome == "TP":
-
-            gross_r = (
-                tp_atr /
-                sl_atr
-            )
-
-        elif outcome == "SL":
-
-            gross_r = -1.0
 
         else:
 
-            pnl = (
-                effective_entry -
-                exit_price
-            )
+            hit_sl = high >= sl
+            hit_tp = low <= tp
 
-            gross_r = (
-                pnl /
-                sl_distance
-            )
+            # Conservativo:
+            # se entrambi nella stessa candela -> SL.
+            if hit_sl and hit_tp:
 
-        cost_r = (
-            EXIT_COST /
-            sl_distance
-        )
+                exit_index = j
+                exit_price = sl
+                result = "SL"
+                break
 
-        net_r = (
-            gross_r -
-            cost_r
-        )
+            if hit_sl:
 
-        results.append(
-            net_r
-        )
+                exit_index = j
+                exit_price = sl
+                result = "SL"
+                break
 
-        last_signal_idx = idx
+            if hit_tp:
 
-    return np.asarray(
-        results,
-        dtype=float
-    )
+                exit_index = j
+                exit_price = tp
+                result = "TP"
+                break
 
+    # ========================================================
+    # R NETTO
+    # ========================================================
 
-# ============================================================
-# STATISTICHE
-# ============================================================
+    if direction == "BUY":
 
-def stats(r):
-
-    if len(r) == 0:
-
-        return {
-            "trades": 0,
-            "win_rate": np.nan,
-            "total_R": np.nan,
-            "avg_R": np.nan,
-            "PF": np.nan,
-            "DD": np.nan,
-        }
-
-    wins = r[r > 0]
-    losses = r[r < 0]
-
-    gross_profit = (
-        wins.sum()
-    )
-
-    gross_loss = abs(
-        losses.sum()
-    )
-
-    if gross_loss > 0:
-        pf = (
-            gross_profit /
-            gross_loss
-        )
-    else:
-        pf = np.inf
-
-    equity = np.cumsum(r)
-
-    running_max = np.maximum.accumulate(
-        np.concatenate(
-            [
-                [0.0],
-                equity,
-            ]
-        )
-    )[1:]
-
-    dd = (
-        running_max -
-        equity
-    )
-
-    max_dd = (
-        dd.max()
-        if len(dd)
-        else 0
-    )
-
-    return {
-        "trades": len(r),
-        "win_rate": (
-            len(wins) /
-            len(r) *
-            100
-        ),
-        "total_R": r.sum(),
-        "avg_R": r.mean(),
-        "PF": pf,
-        "DD": max_dd,
-    }
-
-
-# ============================================================
-# VALUTAZIONE
-# ============================================================
-
-def evaluate(
-    params,
-    dev,
-    val,
-    test,
-    dev_future,
-    val_future,
-    test_future,
-):
-
-    body = params["body_ratio"]
-    close_loc = params["close_location"]
-    ema_gap = params["ema_gap"]
-    mom_atr = params["mom_atr"]
-
-    rsi_low = params["rsi_low"]
-    rsi_high = params["rsi_high"]
-
-    tp = params["tp"]
-    sl = params["sl"]
-
-    horizon = params["horizon"]
-    cooldown = params["cooldown"]
-
-    # --------------------------------------------------------
-    # SIGNAL
-    # --------------------------------------------------------
-
-    dev_mask = signal_mask(
-        dev,
-        body,
-        close_loc,
-        ema_gap,
-        mom_atr,
-        rsi_low,
-        rsi_high,
-    )
-
-    val_mask = signal_mask(
-        val,
-        body,
-        close_loc,
-        ema_gap,
-        mom_atr,
-        rsi_low,
-        rsi_high,
-    )
-
-    test_mask = signal_mask(
-        test,
-        body,
-        close_loc,
-        ema_gap,
-        mom_atr,
-        rsi_low,
-        rsi_high,
-    )
-
-    # --------------------------------------------------------
-    # SIMULAZIONE
-    # --------------------------------------------------------
-
-    dev_r = simulate_fast(
-        dev,
-        dev_mask,
-        dev_future[0],
-        dev_future[1],
-        dev_future[2],
-        tp,
-        sl,
-        horizon,
-        cooldown,
-    )
-
-    val_r = simulate_fast(
-        val,
-        val_mask,
-        val_future[0],
-        val_future[1],
-        val_future[2],
-        tp,
-        sl,
-        horizon,
-        cooldown,
-    )
-
-    test_r = simulate_fast(
-        test,
-        test_mask,
-        test_future[0],
-        test_future[1],
-        test_future[2],
-        tp,
-        sl,
-        horizon,
-        cooldown,
-    )
-
-    ds = stats(dev_r)
-    vs = stats(val_r)
-    ts = stats(test_r)
-
-    # --------------------------------------------------------
-    # SCORE
-    # --------------------------------------------------------
-
-    score = robust_score(
-        ds,
-        vs,
-        ts,
-    )
-
-    return {
-        **params,
-
-        "DEV_trades": ds["trades"],
-        "DEV_win": ds["win_rate"],
-        "DEV_total_R": ds["total_R"],
-        "DEV_avg_R": ds["avg_R"],
-        "DEV_PF": ds["PF"],
-        "DEV_DD": ds["DD"],
-
-        "VAL_trades": vs["trades"],
-        "VAL_win": vs["win_rate"],
-        "VAL_total_R": vs["total_R"],
-        "VAL_avg_R": vs["avg_R"],
-        "VAL_PF": vs["PF"],
-        "VAL_DD": vs["DD"],
-
-        "TEST_trades": ts["trades"],
-        "TEST_win": ts["win_rate"],
-        "TEST_total_R": ts["total_R"],
-        "TEST_avg_R": ts["avg_R"],
-        "TEST_PF": ts["PF"],
-        "TEST_DD": ts["DD"],
-
-        "ROBUST_SCORE": score,
-    }
-
-
-# ============================================================
-# ROBUST SCORE
-# ============================================================
-
-def robust_score(
-    dev,
-    val,
-    test,
-):
-
-    # Minimo numero di operazioni
-    if (
-        dev["trades"] < 30
-        or val["trades"] < 15
-        or test["trades"] < 15
-    ):
-        return -999999.0
-
-    values = [
-        dev["avg_R"],
-        val["avg_R"],
-        test["avg_R"],
-    ]
-
-    if not all(
-        np.isfinite(x)
-        for x in values
-    ):
-        return -999999.0
-
-    positive_periods = sum(
-        x > 0
-        for x in values
-    )
-
-    pf_values = [
-        dev["PF"],
-        val["PF"],
-        test["PF"],
-    ]
-
-    pf_positive = sum(
-        x > 1
-        for x in pf_values
-        if np.isfinite(x)
-    )
-
-    # --------------------------------------------------------
-    # BONUS / PENALTY
-    # --------------------------------------------------------
-
-    consistency = (
-        0.40 * dev["avg_R"]
-        +
-        0.30 * val["avg_R"]
-        +
-        0.30 * test["avg_R"]
-    )
-
-    pf_score = (
-        0.40 * min(dev["PF"], 3)
-        +
-        0.30 * min(val["PF"], 3)
-        +
-        0.30 * min(test["PF"], 3)
-    )
-
-    score = (
-        consistency * 100
-        +
-        pf_score * 10
-        +
-        positive_periods * 10
-        +
-        pf_positive * 5
-    )
-
-    # Penalizza fortemente i periodi negativi
-    if dev["avg_R"] <= 0:
-        score -= 30
-
-    if val["avg_R"] <= 0:
-        score -= 30
-
-    if test["avg_R"] <= 0:
-        score -= 30
-
-    if dev["PF"] <= 1:
-        score -= 15
-
-    if val["PF"] <= 1:
-        score -= 15
-
-    if test["PF"] <= 1:
-        score -= 15
-
-    return score
-
-
-# ============================================================
-# SCANNER
-# ============================================================
-
-def run_scanner(
-    dev,
-    val,
-    test,
-):
-
-    print()
-    print("=" * 78)
-    print("V9.1 - TARGETED ROBUSTNESS SCANNER")
-    print("=" * 78)
-
-    total = (
-        len(BODY_RATIOS)
-        *
-        len(CLOSE_LOCATION_MAX)
-        *
-        len(EMA_GAP_MIN)
-        *
-        len(MOM_ATR_MIN)
-        *
-        len(RSI_RANGES)
-        *
-        len(TP_VALUES)
-        *
-        len(SL_VALUES)
-        *
-        len(HORIZONS)
-        *
-        len(COOLDOWNS)
-    )
-
-    print(
-        f"Configurazioni teoriche: {total:,}"
-    )
-
-    print(
-        "Direzione: SELL"
-    )
-
-    print(
-        "Motivo: V8/V8.1 ha mostrato "
-        "il setup SELL come area più interessante."
-    )
-
-    # --------------------------------------------------------
-    # FUTURE ARRAYS
-    # --------------------------------------------------------
-
-    (
-        dev,
-        dev_high,
-        dev_low,
-        dev_close,
-    ) = add_future_arrays(dev)
-
-    (
-        val,
-        val_high,
-        val_low,
-        val_close,
-    ) = add_future_arrays(val)
-
-    (
-        test,
-        test_high,
-        test_low,
-        test_close,
-    ) = add_future_arrays(test)
-
-    dev_future = (
-        dev_high,
-        dev_low,
-        dev_close,
-    )
-
-    val_future = (
-        val_high,
-        val_low,
-        val_close,
-    )
-
-    test_future = (
-        test_high,
-        test_low,
-        test_close,
-    )
-
-    results = []
-
-    counter = 0
-
-    start = time.time()
-
-    # --------------------------------------------------------
-    # LOOP
-    # --------------------------------------------------------
-
-    for body in BODY_RATIOS:
-
-        for close_loc in CLOSE_LOCATION_MAX:
-
-            for ema_gap in EMA_GAP_MIN:
-
-                for mom_atr in MOM_ATR_MIN:
-
-                    for rsi_low, rsi_high in RSI_RANGES:
-
-                        for tp in TP_VALUES:
-
-                            for sl in SL_VALUES:
-
-                                # TP deve essere superiore
-                                # alla distanza SL.
-                                if tp <= sl:
-                                    continue
-
-                                for horizon in HORIZONS:
-
-                                    for cooldown in COOLDOWNS:
-
-                                        counter += 1
-
-                                        params = {
-                                            "direction": "SELL",
-
-                                            "body_ratio": body,
-
-                                            "close_location": close_loc,
-
-                                            "ema_gap": ema_gap,
-
-                                            "mom_atr": mom_atr,
-
-                                            "rsi_low": rsi_low,
-
-                                            "rsi_high": rsi_high,
-
-                                            "tp": tp,
-
-                                            "sl": sl,
-
-                                            "horizon": horizon,
-
-                                            "cooldown": cooldown,
-                                        }
-
-                                        result = evaluate(
-                                            params,
-                                            dev,
-                                            val,
-                                            test,
-                                            dev_future,
-                                            val_future,
-                                            test_future,
-                                        )
-
-                                        results.append(
-                                            result
-                                        )
-
-                                        # ------------------------------------------------
-                                        # PROGRESS
-                                        # ------------------------------------------------
-
-                                        if (
-                                            counter % 250 == 0
-                                        ):
-
-                                            elapsed = (
-                                                time.time()
-                                                - start
-                                            )
-
-                                            rate = (
-                                                counter /
-                                                elapsed
-                                                if elapsed > 0
-                                                else 0
-                                            )
-
-                                            remaining = (
-                                                (
-                                                    total -
-                                                    counter
-                                                )
-                                                /
-                                                rate
-                                                if rate > 0
-                                                else 0
-                                            )
-
-                                            print(
-                                                f"[{counter:,}/{total:,}] "
-                                                f"{counter / total * 100:5.1f}% | "
-                                                f"{rate:.1f} cfg/s | "
-                                                f"ETA {remaining / 60:.1f} min"
-                                            )
-
-    return pd.DataFrame(
-        results
-    )
-
-
-# ============================================================
-# FILTRO ROBUSTEZ
-# ============================================================
-
-def filter_robust(results):
-
-    robust = results[
-        (results["DEV_trades"] >= 30)
-        &
-        (results["VAL_trades"] >= 15)
-        &
-        (results["TEST_trades"] >= 15)
-
-        &
-        (results["DEV_avg_R"] > 0)
-        &
-        (results["VAL_avg_R"] > 0)
-        &
-        (results["TEST_avg_R"] > 0)
-
-        &
-        (results["DEV_PF"] > 1)
-        &
-        (results["VAL_PF"] > 1)
-        &
-        (results["TEST_PF"] > 1)
-    ].copy()
-
-    if robust.empty:
-        return robust
-
-    robust["AVG_R_RANGE"] = (
-        robust[
-            [
-                "DEV_avg_R",
-                "VAL_avg_R",
-                "TEST_avg_R",
-            ]
-        ].max(axis=1)
-        -
-        robust[
-            [
-                "DEV_avg_R",
-                "VAL_avg_R",
-                "TEST_avg_R",
-            ]
-        ].min(axis=1)
-    )
-
-    robust = robust.sort_values(
-        [
-            "ROBUST_SCORE",
-            "VAL_avg_R",
-            "TEST_avg_R",
-        ],
-        ascending=False,
-    )
-
-    return robust
-
-
-# ============================================================
-# REPORT
-# ============================================================
-
-def print_report(
-    results,
-    robust,
-):
-
-    print()
-    print("=" * 78)
-    print("RISULTATI V9.1")
-    print("=" * 78)
-
-    print(
-        f"Configurazioni analizzate: "
-        f"{len(results):,}"
-    )
-
-    print(
-        f"Configurazioni robuste: "
-        f"{len(robust):,}"
-    )
-
-    cols = [
-        "direction",
-
-        "body_ratio",
-        "close_location",
-        "ema_gap",
-        "mom_atr",
-
-        "rsi_low",
-        "rsi_high",
-
-        "tp",
-        "sl",
-        "horizon",
-        "cooldown",
-
-        "DEV_trades",
-        "DEV_avg_R",
-        "DEV_PF",
-
-        "VAL_trades",
-        "VAL_avg_R",
-        "VAL_PF",
-
-        "TEST_trades",
-        "TEST_avg_R",
-        "TEST_PF",
-
-        "ROBUST_SCORE",
-    ]
-
-    top = results.sort_values(
-        "ROBUST_SCORE",
-        ascending=False,
-    ).head(20)
-
-    print()
-    print("=" * 78)
-    print("TOP 20 ROBUST SCORE")
-    print("=" * 78)
-
-    print(
-        top[cols].to_string(
-            index=False,
-            float_format=lambda x:
-            f"{x:.4f}"
-        )
-    )
-
-    print()
-
-    if len(robust) > 0:
-
-        print("=" * 78)
-        print("CONFIGURAZIONI ROBUSTE")
-        print("=" * 78)
-
-        print(
-            robust[
-                cols
-            ].head(30).to_string(
-                index=False,
-                float_format=lambda x:
-                f"{x:.4f}"
-            )
+        gross_move = (
+            exit_price -
+            entry_price
         )
 
     else:
 
-        print("=" * 78)
-        print("NESSUNA CONFIGURAZIONE ROBUSTA")
-        print("=" * 78)
-
-        print(
-            "Nessuna configurazione ha superato "
-            "tutti i requisiti DEV + VAL + TEST."
+        gross_move = (
+            entry_price -
+            exit_price
         )
 
-        print(
-            "Questo è un risultato utile: "
-            "non trasferiamo una configurazione "
-            "fragile dentro bot.py."
-        )
+    net_move = (
+        gross_move -
+        ROUND_TRIP_COST
+    )
+
+    risk = SL_ATR * atr
+
+    r_multiple = (
+        net_move /
+        risk
+    )
+
+    return {
+        "entry_index": entry_index,
+        "exit_index": exit_index,
+        "entry_time": entry_row["entry_time"],
+        "exit_time": df.iloc[exit_index]["entry_time"],
+        "direction": direction,
+        "entry": entry_price,
+        "sl": sl,
+        "tp": tp,
+        "exit": exit_price,
+        "atr": atr,
+        "r": r_multiple,
+        "result": result
+    }
 
 
 # ============================================================
-# MAIN
+# BACKTEST
 # ============================================================
 
-def main():
+def run_backtest(df):
 
-    start = time.time()
+    trades = []
 
-    print()
-    print("=" * 78)
-    print("XAU/USD BACKTEST V9.1")
-    print("TARGETED ROBUSTNESS VALIDATION")
-    print("=" * 78)
-
-    # --------------------------------------------------------
-    # DOWNLOAD
-    # --------------------------------------------------------
-
-    df = download_data()
-
-    # --------------------------------------------------------
-    # INDICATORI
-    # --------------------------------------------------------
-
-    df = prepare_data(
-        df
-    )
-
-    # --------------------------------------------------------
-    # SPLIT
-    # --------------------------------------------------------
-
-    dev, val, test = split_data(
-        df
-    )
-
-    # --------------------------------------------------------
-    # SCANNER
-    # --------------------------------------------------------
-
-    results = run_scanner(
-        dev,
-        val,
-        test,
-    )
-
-    # --------------------------------------------------------
-    # SALVATAGGIO
-    # --------------------------------------------------------
-
-    results = results.sort_values(
-        "ROBUST_SCORE",
-        ascending=False,
-    )
-
-    results.to_csv(
-        RESULTS_FILE,
-        index=False,
-    )
-
-    # --------------------------------------------------------
-    # ROBUST
-    # --------------------------------------------------------
-
-    robust = filter_robust(
-        results
-    )
-
-    robust.to_csv(
-        ROBUST_FILE,
-        index=False,
-    )
-
-    # --------------------------------------------------------
-    # REPORT
-    # --------------------------------------------------------
-
-    print_report(
-        results,
-        robust,
-    )
-
-    elapsed = (
-        time.time() -
-        start
-    )
-
-    print()
-    print("=" * 78)
-    print("FINE V9.1")
-    print("=" * 78)
-
-    print(
-        f"Tempo totale: "
-        f"{elapsed / 60:.2f} minuti"
-    )
-
-    print()
-    print(
-        f"Risultati completi: "
-        f"{RESULTS_FILE}"
-    )
-
-    print(
-        f"Solo robusti: "
-        f"{ROBUST_FILE}"
-    )
-
-    print()
-    print(
-        "NON modificare ancora bot.py."
-    )
-
-    print(
-        "Prima analizziamo DEV + VAL + TEST."
-    )
-
-
-# ============================================================
-# AVVIO
-# ============================================================
-
-if __name__ == "__main__":
-    main()
+    last_entry_time = None
+    next_available
