@@ -37,7 +37,7 @@ ROBUST_FILE = os.path.join(
     "v9_1_robust.csv"
 )
 
-N_CANDLES = 9999
+N_CANDLES = 5000
 
 
 # ============================================================
