@@ -1,19 +1,25 @@
 
 import os
+import time
 import traceback
-import requests
+import warnings
+
 import numpy as np
 import pandas as pd
+import requests
 
+warnings.filterwarnings("ignore")
 
 # ============================================================
-# V10.1 — AGGRESSIVE BUT PRUDENT
-# Breakout più frequenti, filtri di rischio mantenuti
+# V10 — AGGRESSIVE TREND ANTICIPATION
+# PAPER / DEMO ONLY
 # ============================================================
+
+VERSION = "V10 — AGGRESSIVE TREND ANTICIPATION"
 
 SYMBOL = "XAU/USD"
 INTERVAL = "5min"
-DATA_SIZE = 500
+OUTPUTSIZE = 500
 
 API_KEY = os.getenv("TWELVE_DATA_API_KEY")
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
@@ -21,38 +27,501 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
 if not API_KEY:
     raise RuntimeError("TWELVE_DATA_API_KEY non configurato")
+
 if not TELEGRAM_TOKEN:
     raise RuntimeError("TELEGRAM_TOKEN non configurato")
+
 if not TELEGRAM_CHAT_ID:
     raise RuntimeError("TELEGRAM_CHAT_ID non configurato")
 
-
-# PARAMETRI STRATEGIA
-
-EMA_FAST = 20
-EMA_MID = 50
-EMA_SLOW = 100
-
+# Parametri sperimentali
 BREAKOUT_LOOKBACK = 12
-BODY_RATIO_MIN = 0.40
-CLOSE_LOCATION_MAX = 0.20
-
-MOMENTUM_ATR_MIN = 0.10
-
-ATR_PERIOD = 14
-ATR_AVG_PERIOD = 50
-ATR_REGIME_MIN = 0.85
-
-RSI_PERIOD = 14
-BUY_RSI_MIN, BUY_RSI_MAX = 50, 70
-SELL_RSI_MIN, SELL_RSI_MAX = 30, 50
-
-EMA_GAP_ATR_MIN = 0.10
+COOLDOWN_BARS = 3
 
 SL_ATR = 0.80
 TP_ATR = 1.50
 
-COOLDOWN_MIN = 15
+MIN_SCORE = 6
+MIN_SCORE_DIFFERENCE = 2
+
+API_URL = "https://api.twelvedata.com/time_series"
+TELEGRAM_URL = (
+    f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+)
+
+# ============================================================
+# DOWNLOAD DATI
+# ============================================================
+
+def download_data():
+    params = {
+        "symbol": SYMBOL,
+        "interval": INTERVAL,
+        "outputsize": OUTPUTSIZE,
+        "timezone": "UTC",
+        "apikey": API_KEY,
+        "format": "JSON",
+    }
+
+    response = requests.get(
+        API_URL,
+        params=params,
+        timeout=30,
+    )
+    response.raise_for_status()
+    data = response.json()
+
+    if data.get("status") == "error" or "values" not in data:
+        message = data.get("message", str(data))
+        raise RuntimeError(f"Errore Twelve Data: {message}")
+
+    df = pd.DataFrame(data["values"])
+
+    required = ["datetime", "open", "high", "low", "close"]
+    missing = set(required) - set(df.columns)
+
+    if missing:
+        raise RuntimeError(
+            f"Colonne mancanti nei dati: {sorted(missing)}"
+        )
+
+    df["datetime"] = pd.to_datetime(
+        df["datetime"],
+        utc=True,
+        errors="coerce",
+    )
+
+    for col in ["open", "high", "low", "close"]:
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+
+    df = (
+        df.dropna(subset=required)
+        .drop_duplicates(subset=["datetime"])
+        .sort_values("datetime")
+        .reset_index(drop=True)
+    )
+
+    # Esclude la candela 5m non ancora chiusa.
+    now = pd.Timestamp.now(tz="UTC")
+    df = df[
+        df["datetime"] + pd.Timedelta(minutes=5) <= now
+    ].copy()
+
+    df = df.reset_index(drop=True)
+
+    if len(df) < 150:
+        raise RuntimeError(
+            f"Dati insufficienti: solo {len(df)} candele chiuse"
+        )
+
+    return df
+
+
+# ============================================================
+# INDICATORI BASE
+# ============================================================
+
+def calculate_base_indicators(df):
+    df = df.copy()
+
+    close = df["close"]
+    high = df["high"]
+    low = df["low"]
+
+    # Medie mobili
+    df["ema9"] = close.ewm(
+        span=9, adjust=False
+    ).mean()
+
+    df["ema20"] = close.ewm(
+        span=20, adjust=False
+    ).mean()
+
+    df["ema50"] = close.ewm(
+        span=50, adjust=False
+    ).mean()
+
+    df["ema100"] = close.ewm(
+        span=100, adjust=False
+    ).mean()
+
+    # ATR 14
+    previous_close = close.shift(1)
+
+    tr = pd.concat(
+        [
+            high - low,
+            (high - previous_close).abs(),
+            (low - previous_close).abs(),
+        ],
+        axis=1,
+    ).max(axis=1)
+
+    df["atr"] = tr.ewm(
+        alpha=1 / 14,
+        adjust=False,
+        min_periods=14,
+    ).mean()
+
+    df["atr_avg50"] = df["atr"].rolling(
+        50, min_periods=30
+    ).mean()
+
+    df["atr_ratio"] = df["atr"] / df["atr_avg50"]
+
+    # RSI 14
+    delta = close.diff()
+
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+
+    avg_gain = gain.ewm(
+        alpha=1 / 14,
+        adjust=False,
+        min_periods=14,
+    ).mean()
+
+    avg_loss = loss.ewm(
+        alpha=1 / 14,
+        adjust=False,
+        min_periods=14,
+    ).mean()
+
+    rs = avg_gain / avg_loss.replace(0, np.nan)
+
+    df["rsi"] = 100 - (100 / (1 + rs))
+
+    df.loc[
+        (avg_loss == 0) & (avg_gain > 0), "rsi"
+    ] = 100
+
+    df.loc[
+        (avg_loss == 0) & (avg_gain == 0), "rsi"
+    ] = 50
+
+    # MACD
+    ema12 = close.ewm(
+        span=12, adjust=False
+    ).mean()
+
+    ema26 = close.ewm(
+        span=26, adjust=False
+    ).mean()
+
+    df["macd"] = ema12 - ema26
+
+    df["macd_signal"] = df["macd"].ewm(
+        span=9, adjust=False
+    ).mean()
+
+    df["macd_hist"] = (
+        df["macd"] - df["macd_signal"]
+    )
+
+    # Momentum a 3 e 6 candele, normalizzato per ATR
+    df["mom3"] = (
+        close - close.shift(3)
+    ) / df["atr"]
+
+    df["mom6"] = (
+        close - close.shift(6)
+    ) / df["atr"]
+
+    # Pendenza EMA20
+    df["ema20_slope"] = (
+        df["ema20"] - df["ema20"].shift(3)
+    ) / df["atr"]
+
+    # Qualità della candela
+    candle_range = (high - low).replace(0, np.nan)
+
+    df["body_ratio"] = (
+        (close - df["open"]).abs() / candle_range
+    )
+
+    df["close_location"] = (
+        (close - low) / candle_range
+    )
+
+    # Livelli di breakout: solo candele precedenti
+    df["breakout_high"] = (
+        high.shift(1)
+        .rolling(BREAKOUT_LOOKBACK)
+        .max()
+    )
+
+    df["breakout_low"] = (
+        low.shift(1)
+        .rolling(BREAKOUT_LOOKBACK)
+        .min()
+    )
+
+    # Ampiezza del gap fra EMA
+    df["ema_gap_atr"] = (
+        (df["ema20"] - df["ema50"]).abs()
+        / df["atr"]
+    )
+
+    return df
+
+
+# ============================================================
+# TREND MULTI-TIMEFRAME
+# ============================================================
+
+def build_higher_timeframe(df, minutes):
+    """
+    Costruisce candele complete da 15m o 60m.
+    available_at impedisce di usare una candela HTF
+    prima della sua chiusura.
+    """
+
+    temp = df.set_index("datetime")[
+        ["open", "high", "low", "close"]
+    ].copy()
+
+    rule = f"{minutes}min"
+
+    tf = temp.resample(
+        rule,
+        label="left",
+        closed="left",
+    ).agg({
+        "open": "first",
+        "high": "max",
+        "low": "min",
+        "close": "last",
+    })
+
+    # Conteggio separato: datetime è l'indice, non una colonna.
+    tf["candle_count"] = (
+        temp["close"]
+        .resample(rule, label="left", closed="left")
+        .count()
+    )
+
+    expected_count = minutes // 5
+
+    tf = tf[
+        tf["candle_count"] == expected_count
+    ].copy()
+
+    tf = tf.dropna(
+        subset=["open", "high", "low", "close"]
+    )
+
+    tf["ema20"] = tf["close"].ewm(
+        span=20, adjust=False
+    ).mean()
+
+    tf["ema50"] = tf["close"].ewm(
+        span=50, adjust=False
+    ).mean()
+
+    tf["ema20_previous"] = tf["ema20"].shift(3)
+
+    tf["trend"] = np.select(
+        [
+            (tf["ema20"] > tf["ema50"])
+            & (tf["ema20"] > tf["ema20_previous"]),
+
+            (tf["ema20"] < tf["ema50"])
+            & (tf["ema20"] < tf["ema20_previous"]),
+        ],
+        [1, -1],
+        default=0,
+    )
+
+    # Una candela HTF è utilizzabile solo dopo la chiusura.
+    tf["available_at"] = (
+        tf.index + pd.Timedelta(minutes=minutes)
+    )
+
+    return tf.reset_index(drop=True)[
+        ["available_at", "trend"]
+    ]
+
+
+def attach_higher_timeframes(df):
+    df = df.copy()
+
+    df["entry_time"] = (
+        df["datetime"] + pd.Timedelta(minutes=5)
+    )
+
+    tf15 = build_higher_timeframe(df, 15)
+    tf60 = build_higher_timeframe(df, 60)
+
+    # Merge backward: mai usare trend HTF futuro.
+    df = pd.merge_asof(
+        df.sort_values("entry_time"),
+        tf15.sort_values("available_at"),
+        left_on="entry_time",
+        right_on="available_at",
+        direction="backward",
+    )
+
+    df = df.rename(columns={"trend": "trend15"})
+    df = df.drop(columns=["available_at"])
+
+    df = pd.merge_asof(
+        df.sort_values("entry_time"),
+        tf60.sort_values("available_at"),
+        left_on="entry_time",
+        right_on="available_at",
+        direction="backward",
+    )
+
+    df = df.rename(columns={"trend": "trend60"})
+    df = df.drop(columns=["available_at"])
+
+    df["trend15"] = df["trend15"].fillna(0)
+    df["trend60"] = df["trend60"].fillna(0)
+
+    return df.sort_values("datetime").reset_index(drop=True)
+
+
+def calculate_indicators(df):
+    df = calculate_base_indicators(df)
+    df = attach_higher_timeframes(df)
+    return df
+
+
+# ============================================================
+# PUNTEGGIO DIREZIONALE
+# ============================================================
+
+def score_row(row):
+    """
+    Punteggio euristico, NON probabilità statistica.
+    Permette di rilevare anche accelerazioni iniziali,
+    senza richiedere sempre tutte le EMA allineate.
+    """
+
+    values = [
+        "close", "atr", "rsi", "ema9", "ema20",
+        "ema50", "ema100", "macd_hist", "mom3",
+        "mom6", "ema20_slope", "body_ratio",
+        "close_location", "breakout_high",
+        "breakout_low", "atr_ratio", "trend15",
+        "trend60",
+    ]
+
+    if any(
+        pd.isna(row.get(key, np.nan))
+        for key in values
+    ):
+        return 0, 0
+
+    if row["atr"] <= 0:
+        return 0, 0
+
+    buy = 0
+    sell = 0
+
+    # Struttura e velocità delle EMA
+    buy += int(row["ema9"] > row["ema20"])
+    buy += int(row["ema20"] > row["ema50"])
+    buy += int(row["ema50"] > row["ema100"])
+    buy += int(row["ema20_slope"] > 0.02)
+
+    sell += int(row["ema9"] < row["ema20"])
+    sell += int(row["ema20"] < row["ema50"])
+    sell += int(row["ema50"] < row["ema100"])
+    sell += int(row["ema20_slope"] < -0.02)
+
+    # Momentum: cerca l'accelerazione prima che sia estrema
+    buy += int(row["mom3"] > 0.08)
+    buy += int(row["mom6"] > 0.10)
+
+    sell += int(row["mom3"] < -0.08)
+    sell += int(row["mom6"] < -0.10)
+
+    # MACD e sua accelerazione
+    buy += int(row["macd_hist"] > 0)
+    buy += int(row["macd_hist"] > row["macd_hist_previous"])
+
+    sell += int(row["macd_hist"] < 0)
+    sell += int(row["macd_hist"] < row["macd_hist_previous"])
+
+    # RSI: evita di richiedere un RSI già molto estremo
+    buy += int(48 <= row["rsi"] <= 72)
+    sell += int(28 <= row["rsi"] <= 52)
+
+    # Trend superiori: conferme, non blocchi assoluti
+    buy += int(row["trend15"] == 1)
+    buy += int(row["trend60"] == 1)
+
+    sell += int(row["trend15"] == -1)
+    sell += int(row["trend60"] == -1)
+
+    # Breakout e vicinanza al livello di rottura
+    buy += int(
+        row["close"] >= row["breakout_high"]
+        or (
+            row["breakout_high"] - row["close"]
+        ) <= 0.15 * row["atr"]
+    )
+
+    sell += int(
+        row["close"] <= row["breakout_low"]
+        or (
+            row["close"] - row["breakout_low"]
+        ) <= 0.15 * row["atr"]
+    )
+
+    # Qualità della candela e posizione della chiusura
+    buy += int(
+        row["body_ratio"] >= 0.35
+        and row["close_location"] >= 0.65
+    )
+
+    sell += int(
+        row["body_ratio"] >= 0.35
+        and row["close_location"] <= 0.35
+    )
+
+    # Volatilità sufficiente, ma non necessariamente elevata
+    buy += int(row["atr_ratio"] >= 0.80)
+    sell += int(row["atr_ratio"] >= 0.80)
+
+    return buy, sell
+
+
+def calculate_scores(df):
+    df = df.copy()
+
+    df["macd_hist_previous"] = df["macd_hist"].shift(1)
+
+    scores = df.apply(
+        score_row,
+        axis=1,
+        result_type="expand",
+    )
+
+    df["buy_score"] = scores[0].astype(int)
+    df["sell_score"] = scores[1].astype(int)
+
+    return df
+
+
+def get_signal(row):
+    buy = int(row["buy_score"])
+    sell = int(row["sell_score"])
+
+    if (
+        buy >= MIN_SCORE
+        and buy - sell >= MIN_SCORE_DIFFERENCE
+    ):
+        return "BUY", buy, sell
+
+    if (
+        sell >= MIN_SCORE
+        and sell - buy >= MIN_SCORE_DIFFERENCE
+    ):
+        return "SELL", buy, sell
+
+    return None, buy, sell
 
 
 # ============================================================
@@ -60,314 +529,22 @@ COOLDOWN_MIN = 15
 # ============================================================
 
 def send_telegram(message):
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     response = requests.post(
-        url,
-        json={"chat_id": TELEGRAM_CHAT_ID, "text": message},
-        timeout=20
+        TELEGRAM_URL,
+        json={
+            "chat_id": TELEGRAM_CHAT_ID,
+            "text": message,
+        },
+        timeout=20,
     )
-    response.raise_for_status()
 
+    response.raise_for_status()
     result = response.json()
+
     if not result.get("ok"):
-        raise RuntimeError(f"Errore Telegram: {result}")
-
-
-# ============================================================
-# DATI
-# ============================================================
-
-def get_data():
-    url = "https://api.twelvedata.com/time_series"
-    params = {
-        "symbol": SYMBOL,
-        "interval": INTERVAL,
-        "outputsize": DATA_SIZE,
-        "apikey": API_KEY,
-        "timezone": "UTC",
-        "order": "ASC"
-    }
-
-    response = requests.get(url, params=params, timeout=30)
-    response.raise_for_status()
-    data = response.json()
-
-    if "values" not in data:
-        raise RuntimeError(f"Errore Twelve Data: {data}")
-
-    df = pd.DataFrame(data["values"])
-    if df.empty:
-        raise RuntimeError("Twelve Data ha restituito dati vuoti.")
-
-    df["datetime"] = pd.to_datetime(df["datetime"], utc=True)
-
-    for col in ["open", "high", "low", "close"]:
-        df[col] = pd.to_numeric(df[col], errors="coerce")
-
-    df = (
-        df.dropna(subset=["open", "high", "low", "close"])
-        .sort_values("datetime")
-        .drop_duplicates("datetime")
-        .reset_index(drop=True)
-    )
-
-    # Escludi la candela 5m non ancora chiusa.
-    now_utc = pd.Timestamp.now(tz="UTC")
-    df = df[df["datetime"] + pd.Timedelta(minutes=5) <= now_utc]
-    df = df.reset_index(drop=True)
-
-    if len(df) < 200:
         raise RuntimeError(
-            f"Candele chiuse insufficienti: {len(df)}"
+            f"Telegram ha rifiutato il messaggio: {result}"
         )
-
-    return df
-
-
-# ============================================================
-# INDICATORI
-# ============================================================
-
-def calculate_indicators(df):
-    df = df.copy()
-
-    # EMA
-    for period, name in [
-        (EMA_FAST, "ema20"),
-        (EMA_MID, "ema50"),
-        (EMA_SLOW, "ema100")
-    ]:
-        df[name] = df["close"].ewm(
-            span=period, adjust=False
-        ).mean()
-
-    # ATR
-    previous_close = df["close"].shift(1)
-
-    tr = pd.concat([
-        df["high"] - df["low"],
-        (df["high"] - previous_close).abs(),
-        (df["low"] - previous_close).abs()
-    ], axis=1).max(axis=1)
-
-    df["atr"] = tr.ewm(
-        alpha=1 / ATR_PERIOD, adjust=False
-    ).mean()
-
-    df["atr_avg50"] = df["atr"].rolling(
-        ATR_AVG_PERIOD
-    ).mean()
-
-    # Momentum a 6 candele
-    df["mom6"] = df["close"] - df["close"].shift(6)
-
-    # RSI di Wilder, con gestione dei casi limite
-    delta = df["close"].diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-
-    avg_gain = gain.ewm(
-        alpha=1 / RSI_PERIOD, adjust=False
-    ).mean()
-
-    avg_loss = loss.ewm(
-        alpha=1 / RSI_PERIOD, adjust=False
-    ).mean()
-
-    rs = avg_gain / avg_loss.replace(0, np.nan)
-    df["rsi"] = 100 - (100 / (1 + rs))
-
-    df.loc[(avg_loss == 0) & (avg_gain > 0), "rsi"] = 100
-    df.loc[(avg_gain == 0) & (avg_loss > 0), "rsi"] = 0
-    df.loc[(avg_gain == 0) & (avg_loss == 0), "rsi"] = 50
-
-    # Forza della candela e posizione della chiusura
-    candle_range = (df["high"] - df["low"]).replace(0, np.nan)
-
-    df["body_ratio"] = (
-        (df["close"] - df["open"]).abs() / candle_range
-    )
-
-    df["close_position"] = (
-        (df["close"] - df["low"]) / candle_range
-    )
-
-    # Livelli breakout: esclude la candela corrente
-    df["previous_high"] = (
-        df["high"].rolling(BREAKOUT_LOOKBACK)
-        .max().shift(1)
-    )
-
-    df["previous_low"] = (
-        df["low"].rolling(BREAKOUT_LOOKBACK)
-        .min().shift(1)
-    )
-
-    # Distanza EMA normalizzata per ATR
-    df["ema_gap_atr"] = (
-        (df["ema20"] - df["ema50"]) /
-        df["atr"].replace(0, np.nan)
-    )
-
-    # Ora di chiusura della candela operativa
-    
-temp = df.set_index("datetime").copy()
-
-tf15 = temp.resample(
-    "15min",
-    label="left",
-    closed="left"
-).agg({
-    "open": "first",
-    "high": "max",
-    "low": "min",
-    "close": "last"
-})
-
-# Conta quante candele da 5 minuti compongono
-# ogni candela da 15 minuti.
-tf15["candle_count"] = (
-    temp["close"]
-    .resample("15min", label="left", closed="left")
-    .count()
-)
-
-
-    tf15 = tf15[tf15["datetime"] == 3].copy()
-
-    tf15["ema20_15"] = tf15["close"].ewm(
-        span=20, adjust=False
-    ).mean()
-
-    tf15["ema50_15"] = tf15["close"].ewm(
-        span=50, adjust=False
-    ).mean()
-
-    tf15["trend15"] = np.select(
-        [
-            tf15["ema20_15"] > tf15["ema50_15"],
-            tf15["ema20_15"] < tf15["ema50_15"]
-        ],
-        ["BULLISH", "BEARISH"],
-        default="NEUTRAL"
-    )
-
-    # Ogni candela 15m è disponibile solo alla chiusura.
-    tf15["available_at"] = (
-        tf15.index + pd.Timedelta(minutes=15)
-    )
-
-    tf15 = tf15[["available_at", "trend15"]].sort_values(
-        "available_at"
-    )
-
-    df = pd.merge_asof(
-        df.sort_values("entry_time"),
-        tf15,
-        left_on="entry_time",
-        right_on="available_at",
-        direction="backward"
-    )
-
-    return df.drop(columns=["available_at"], errors="ignore")
-
-
-# ============================================================
-# SEGNALI
-# ============================================================
-
-def check_signal(row):
-    required = [
-        "ema20", "ema50", "ema100", "atr", "atr_avg50",
-        "mom6", "rsi", "body_ratio", "close_position",
-        "previous_high", "previous_low", "ema_gap_atr",
-        "trend15"
-    ]
-
-    if any(pd.isna(row[col]) for col in required):
-        return None
-
-    # Filtro volatilità meno restrittivo della V10
-    if row["atr"] < ATR_REGIME_MIN * row["atr_avg50"]:
-        return None
-
-    common_candle = row["body_ratio"] >= BODY_RATIO_MIN
-
-    buy = (
-        row["ema20"] > row["ema50"] > row["ema100"]
-        and row["ema_gap_atr"] >= EMA_GAP_ATR_MIN
-        and row["trend15"] == "BULLISH"
-        and row["close"] > row["previous_high"]
-        and common_candle
-        and row["close_position"] >= 1 - CLOSE_LOCATION_MAX
-        and row["mom6"] >= MOMENTUM_ATR_MIN * row["atr"]
-        and BUY_RSI_MIN <= row["rsi"] <= BUY_RSI_MAX
-    )
-
-    if buy:
-        return "BUY"
-
-    sell = (
-        row["ema20"] < row["ema50"] < row["ema100"]
-        and row["ema_gap_atr"] <= -EMA_GAP_ATR_MIN
-        and row["trend15"] == "BEARISH"
-        and row["close"] < row["previous_low"]
-        and common_candle
-        and row["close_position"] <= CLOSE_LOCATION_MAX
-        and row["mom6"] <= -MOMENTUM_ATR_MIN * row["atr"]
-        and SELL_RSI_MIN <= row["rsi"] <= SELL_RSI_MAX
-    )
-
-    if sell:
-        return "SELL"
-
-    return None
-
-
-# ============================================================
-# MESSAGGIO TELEGRAM
-# ============================================================
-
-def build_message(direction, row):
-    entry = float(row["close"])
-    atr = float(row["atr"])
-
-    if direction == "BUY":
-        sl = entry - SL_ATR * atr
-        tp = entry + TP_ATR * atr
-        emoji = "🟢"
-    else:
-        sl = entry + SL_ATR * atr
-        tp = entry - TP_ATR * atr
-        emoji = "🔴"
-
-    candle_time = row["datetime"].strftime("%d/%m/%Y %H:%M")
-
-    return f"""
-🧪 PAPER/DEMO — XAU/USD V10.1
-
-{emoji} {direction}
-
-⏰ Candela: {candle_time} UTC
-💰 Entry teorica: {entry:.2f}
-🛑 SL teorico: {sl:.2f}
-🎯 TP teorico: {tp:.2f}
-
-RSI: {row["rsi"]:.2f}
-ATR: {atr:.2f}
-MOM6: {row["mom6"]:.2f}
-Body Ratio: {row["body_ratio"]:.2f}
-Trend 15m: {row["trend15"]}
-
-Breakout: {BREAKOUT_LOOKBACK} candele
-SL: {SL_ATR:.2f} ATR
-TP: {TP_ATR:.2f} ATR
-R:R teorico: 1:{TP_ATR / SL_ATR:.2f}
-Cooldown obiettivo: {COOLDOWN_MIN} min
-
-⚠️ Segnale sperimentale PAPER/DEMO.
-Nessun ordine reale viene eseguito.
-""".strip()
 
 
 # ============================================================
@@ -375,51 +552,99 @@ Nessun ordine reale viene eseguito.
 # ============================================================
 
 def main():
-    print("=" * 65)
-    print("V10.1 — AGGRESSIVE BUT PRUDENT")
-    print("=" * 65)
+    print("=" * 64)
+    print(VERSION)
+    print("=" * 64)
 
-    df = get_data()
+    df = download_data()
+
     print(f"Candele chiuse: {len(df)}")
-    print(f"Ultima candela: {df['datetime'].iloc[-1]}")
+    print(f"Ultima candela: {df.iloc[-1]['datetime']}")
 
     df = calculate_indicators(df)
+    df = calculate_scores(df)
+
     row = df.iloc[-1]
 
-    print("\nCandela analizzata:", row["datetime"])
-    for col in [
-        "close", "rsi", "atr", "mom6", "ema20",
-        "ema50", "ema100", "body_ratio", "close_position"
-    ]:
-        value = row[col]
-        print(f"{col}: {value:.3f}" if pd.notna(value) else f"{col}: n/d")
+    signal, buy_score, sell_score = get_signal(row)
 
-    print("Trend 15m:", row["trend15"])
+    print(f"Prezzo: {row['close']:.2f}")
+    print(f"RSI: {row['rsi']:.2f}")
+    print(f"ATR: {row['atr']:.3f}")
+    print(f"Momentum 3: {row['mom3']:.3f} ATR")
+    print(f"Momentum 6: {row['mom6']:.3f} ATR")
+    print(f"Trend 15m: {int(row['trend15'])}")
+    print(f"Trend 1h: {int(row['trend60'])}")
+    print(f"BUY score: {buy_score}")
+    print(f"SELL score: {sell_score}")
 
-    signal = check_signal(row)
+    # Evita segnali consecutivi della stessa direzione
+    # nelle tre candele precedenti.
+    recent = df.iloc[-(COOLDOWN_BARS + 1):-1]
 
-    if signal is None:
-        print("Nessun segnale V10.1.")
+    previous_signals = [
+        get_signal(previous)[0]
+        for _, previous in recent.iterrows()
+    ]
+
+    if signal and signal in previous_signals:
+        print(
+            f"Segnale {signal} ignorato: "
+            "condizione già presente nelle candele recenti."
+        )
         return
 
-    # Il cooldown è controllato sulle candele precedenti.
-    # Tre candele da 5m corrispondono a 15 minuti.
-    recent = df.iloc[-4:-1]
-    for _, previous_row in recent.iterrows():
-        if check_signal(previous_row) is not None:
-            print("Cooldown attivo: segnale recente già presente.")
-            return
+    if signal is None:
+        print("Nessun segnale: punteggio insufficiente.")
+        return
 
-    message = build_message(signal, row)
+    entry = float(row["close"])
+    atr = float(row["atr"])
 
-    print(f"\nSegnale rilevato: {signal}")
+    if signal == "BUY":
+        sl = entry - SL_ATR * atr
+        tp = entry + TP_ATR * atr
+        score = buy_score
+    else:
+        sl = entry + SL_ATR * atr
+        tp = entry - TP_ATR * atr
+        score = sell_score
+
+    risk = abs(entry - sl)
+    reward = abs(tp - entry)
+
+    message = (
+        f"📊 {VERSION}\n"
+        f"🧪 MODALITÀ PAPER/DEMO — NESSUN ORDINE REALE\n\n"
+        f"Strumento: {SYMBOL}\n"
+        f"Segnale: {signal}\n"
+        f"Prezzo teorico: {entry:.2f}\n"
+        f"Stop Loss: {sl:.2f}\n"
+        f"Take Profit: {tp:.2f}\n\n"
+        f"Punteggio direzionale: {score}\n"
+        f"BUY score: {buy_score}\n"
+        f"SELL score: {sell_score}\n"
+        f"RSI: {row['rsi']:.2f}\n"
+        f"ATR: {atr:.3f}\n"
+        f"Momentum 3: {row['mom3']:.2f} ATR\n"
+        f"Momentum 6: {row['mom6']:.2f} ATR\n"
+        f"Trend 15m: {int(row['trend15'])}\n"
+        f"Trend 1h: {int(row['trend60'])}\n"
+        f"Rapporto teorico rischio/rendimento: "
+        f"1:{reward / risk:.2f}\n"
+        f"Candela UTC: {row['datetime']}\n\n"
+        f"Il punteggio è euristico e non rappresenta "
+        f"una probabilità di successo."
+    )
+
     send_telegram(message)
-    print("Messaggio Telegram inviato.")
+    print(f"Segnale {signal} inviato a Telegram.")
 
 
 if __name__ == "__main__":
     try:
         main()
-    except Exception:
+    except Exception as exc:
+        print(f"ERRORE: {exc}")
         traceback.print_exc()
         raise
