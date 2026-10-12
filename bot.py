@@ -392,6 +392,108 @@ def generate_signal(row):
 
 
 # ============================================================
+# DIAGNOSTICA FILTRI V10
+# Non modifica la generazione dei segnali.
+# ============================================================
+
+def diagnose_filters(row):
+    required = [
+        "ema20", "ema50", "ema100", "atr", "atr_avg50",
+        "mom6", "rsi", "body_ratio", "close_position",
+        "previous_high", "previous_low", "ema_gap_atr",
+        "trend15",
+    ]
+
+    print("\n" + "=" * 58)
+    print("DIAGNOSTICA FILTRI V10")
+    print("=" * 58)
+
+    missing = [
+        col for col in required
+        if pd.isna(row.get(col, np.nan))
+    ]
+
+    if missing:
+        print("DATI MANCANTI:", ", ".join(missing))
+        print("Diagnostica incompleta: alcuni indicatori non disponibili.")
+        return
+
+    # Condizioni BUY
+    buy_checks = {
+        "EMA20 > EMA50 > EMA100":
+            row["ema20"] > row["ema50"] > row["ema100"],
+
+        "Distanza EMA sufficiente":
+            row["ema_gap_atr"] >= EMA_GAP_ATR_MIN,
+
+        "Trend 15m rialzista":
+            row["trend15"] == "BULLISH",
+
+        "Breakout sopra il massimo precedente":
+            row["close"] > row["previous_high"],
+
+        "Corpo candela >= 60%":
+            row["body_ratio"] >= BODY_RATIO_MIN,
+
+        "Chiusura nel 20% superiore":
+            row["close_position"] >= 1 - CLOSE_LOCATION_MAX,
+
+        "Momentum BUY sufficiente":
+            row["mom6"] >= MOMENTUM_ATR_MIN * row["atr"],
+
+        "ATR sopra media 50":
+            row["atr"] > row["atr_avg50"],
+
+        "RSI BUY tra 52 e 68":
+            BUY_RSI_MIN <= row["rsi"] <= BUY_RSI_MAX,
+    }
+
+    # Condizioni SELL
+    sell_checks = {
+        "EMA20 < EMA50 < EMA100":
+            row["ema20"] < row["ema50"] < row["ema100"],
+
+        "Distanza EMA sufficiente":
+            row["ema_gap_atr"] <= -EMA_GAP_ATR_MIN,
+
+        "Trend 15m ribassista":
+            row["trend15"] == "BEARISH",
+
+        "Breakout sotto il minimo precedente":
+            row["close"] < row["previous_low"],
+
+        "Corpo candela >= 60%":
+            row["body_ratio"] >= BODY_RATIO_MIN,
+
+        "Chiusura nel 20% inferiore":
+            row["close_position"] <= CLOSE_LOCATION_MAX,
+
+        "Momentum SELL sufficiente":
+            row["mom6"] <= -MOMENTUM_ATR_MIN * row["atr"],
+
+        "ATR sopra media 50":
+            row["atr"] > row["atr_avg50"],
+
+        "RSI SELL tra 32 e 48":
+            SELL_RSI_MIN <= row["rsi"] <= SELL_RSI_MAX,
+    }
+
+    for direction, checks in [
+        ("BUY", buy_checks),
+        ("SELL", sell_checks),
+    ]:
+        passed = sum(checks.values())
+
+        print(f"\n--- {direction}: {passed}/{len(checks)} filtri superati ---")
+
+        for name, ok in checks.items():
+            print(f"[{'OK' if ok else 'NO'}] {name}")
+
+    print("=" * 58)
+
+
+
+# ============================================================
 # TELEGRAM
 # ============================================================
 
@@ -428,7 +530,10 @@ def main():
     df = calculate_indicators(df)
 
     row = df.iloc[-1]
-    signal = generate_signal(row)
+
+diagnose_filters(row)
+
+signal = generate_signal(row)
 
     print(f"Ultima candela UTC: {row['datetime']}")
     print(f"Prezzo di riferimento: {row['close']:.2f}")
