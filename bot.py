@@ -210,22 +210,28 @@ def calculate_indicators(df):
     )
 
     # Ora di chiusura della candela operativa
-    df["entry_time"] = (
-        df["datetime"] + pd.Timedelta(minutes=5)
-    )
+    
+temp = df.set_index("datetime").copy()
 
-    # Trend 15m: usa solo intervalli completi di tre candele 5m
-    temp = df.set_index("datetime")
+tf15 = temp.resample(
+    "15min",
+    label="left",
+    closed="left"
+).agg({
+    "open": "first",
+    "high": "max",
+    "low": "min",
+    "close": "last"
+})
 
-    tf15 = temp.resample(
-        "15min", label="left", closed="left"
-    ).agg({
-        "open": "first",
-        "high": "max",
-        "low": "min",
-        "close": "last",
-        "datetime": "count"
-    })
+# Conta quante candele da 5 minuti compongono
+# ogni candela da 15 minuti.
+tf15["candle_count"] = (
+    temp["close"]
+    .resample("15min", label="left", closed="left")
+    .count()
+)
+
 
     tf15 = tf15[tf15["datetime"] == 3].copy()
 
