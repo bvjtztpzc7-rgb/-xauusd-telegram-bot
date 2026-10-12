@@ -31,7 +31,7 @@ if not TELEGRAM_TOKEN:
 if not TELEGRAM_CHAT_ID:
     raise RuntimeError("TELEGRAM_CHAT_ID non configurato")
 
-# Strategia V10
+# Parametri strategia V10
 EMA_FAST = 20
 EMA_MID = 50
 EMA_SLOW = 100
@@ -48,6 +48,7 @@ RSI_PERIOD = 14
 
 BUY_RSI_MIN = 52
 BUY_RSI_MAX = 68
+
 SELL_RSI_MIN = 32
 SELL_RSI_MAX = 48
 
@@ -97,11 +98,14 @@ def download_data():
     df = pd.DataFrame(data["values"])
 
     required = ["datetime", "open", "high", "low", "close"]
+
     if df.empty or not set(required).issubset(df.columns):
         raise RuntimeError("Dati Twelve Data mancanti o non validi.")
 
     df["datetime"] = pd.to_datetime(
-        df["datetime"], utc=True, errors="coerce"
+        df["datetime"],
+        utc=True,
+        errors="coerce",
     )
 
     for col in ["open", "high", "low", "close"]:
@@ -114,15 +118,16 @@ def download_data():
         .reset_index(drop=True)
     )
 
-    # Non usare la candela 5m finché non è chiusa.
+    # Esclude la candela 5m non ancora chiusa.
     now = pd.Timestamp.now(tz="UTC")
+
     df = df[
         df["datetime"] + pd.Timedelta(minutes=5) <= now
     ].reset_index(drop=True)
 
     if len(df) < 200:
         raise RuntimeError(
-            f"Dati insufficienti: {len(df)} candele chiuse."
+            f"Dati insufficienti: solo {len(df)} candele chiuse."
         )
 
     print(f"Candele chiuse: {len(df)}")
@@ -143,19 +148,23 @@ def calculate_base_indicators(df):
     high = df["high"]
     low = df["low"]
 
+    # EMA
     df["ema20"] = close.ewm(
-        span=EMA_FAST, adjust=False
+        span=EMA_FAST,
+        adjust=False,
     ).mean()
 
     df["ema50"] = close.ewm(
-        span=EMA_MID, adjust=False
+        span=EMA_MID,
+        adjust=False,
     ).mean()
 
     df["ema100"] = close.ewm(
-        span=EMA_SLOW, adjust=False
+        span=EMA_SLOW,
+        adjust=False,
     ).mean()
 
-    # ATR Wilder
+    # True Range e ATR Wilder
     previous_close = close.shift(1)
 
     tr = pd.concat(
@@ -176,7 +185,7 @@ def calculate_base_indicators(df):
         ATR_AVG_PERIOD
     ).mean()
 
-    # Momentum su 6 candele, in unità di prezzo.
+    # Momentum 6 candele
     df["mom6"] = close - close.shift(6)
 
     # RSI Wilder
@@ -199,14 +208,16 @@ def calculate_base_indicators(df):
     df["rsi"] = 100 - (100 / (1 + rs))
 
     df.loc[
-        (avg_loss == 0) & (avg_gain > 0), "rsi"
+        (avg_loss == 0) & (avg_gain > 0),
+        "rsi",
     ] = 100
 
     df.loc[
-        (avg_loss == 0) & (avg_gain == 0), "rsi"
+        (avg_loss == 0) & (avg_gain == 0),
+        "rsi",
     ] = 50
 
-    # Forza della candela
+    # Corpo della candela e posizione della chiusura
     candle_range = (high - low).replace(0, np.nan)
 
     df["body_ratio"] = (
@@ -217,7 +228,7 @@ def calculate_base_indicators(df):
         (close - low) / candle_range
     )
 
-    # Livelli di breakout: esclusa la candela corrente.
+    # Livelli precedenti: la candela corrente è esclusa.
     df["previous_high"] = (
         high.rolling(BREAKOUT_LOOKBACK)
         .max()
@@ -230,7 +241,7 @@ def calculate_base_indicators(df):
         .shift(1)
     )
 
-    # Distanza firmata tra EMA20 ed EMA50, normalizzata ATR.
+    # Distanza firmata tra EMA20 e EMA50, normalizzata ATR.
     df["ema_gap_atr"] = (
         (df["ema20"] - df["ema50"])
         / df["atr"].replace(0, np.nan)
@@ -240,7 +251,7 @@ def calculate_base_indicators(df):
 
 
 # ============================================================
-# TREND 15 MINUTI SENZA LOOKAHEAD
+# TREND 15 MINUTI — SENZA LOOKAHEAD
 # ============================================================
 
 def attach_15m_trend(df):
@@ -261,26 +272,27 @@ def attach_15m_trend(df):
         "close": "last",
     })
 
-    # Una candela 15m è valida solo se contiene tutte
-    # e tre le candele da 5m attese.
-    tf15["count"] = temp["close"].resample(
-        "15min",
-        label="left",
-        closed="left",
-    ).count()
+    tf15["candle_count"] = (
+        temp["close"]
+        .resample("15min", label="left", closed="left")
+        .count()
+    )
 
+    # Accetta solo candele 15m con tutte le 3 candele da 5m.
     tf15 = tf15[
-        (tf15["count"] == 3)
+        tf15["candle_count"] == 3
     ].dropna(
         subset=["open", "high", "low", "close"]
     ).copy()
 
     tf15["ema20_15"] = tf15["close"].ewm(
-        span=20, adjust=False
+        span=20,
+        adjust=False,
     ).mean()
 
     tf15["ema50_15"] = tf15["close"].ewm(
-        span=50, adjust=False
+        span=50,
+        adjust=False,
     ).mean()
 
     tf15["trend15"] = np.select(
@@ -292,7 +304,7 @@ def attach_15m_trend(df):
         default="NEUTRAL",
     )
 
-    # Disponibile soltanto dopo la chiusura della candela 15m.
+    # Il trend è utilizzabile solo dopo la chiusura della candela 15m.
     tf15["available_at"] = (
         tf15.index + pd.Timedelta(minutes=15)
     )
@@ -301,7 +313,6 @@ def attach_15m_trend(df):
         ["available_at", "trend15"]
     ].sort_values("available_at")
 
-    # Momento in cui la candela 5m risulta chiusa.
     df["entry_time"] = (
         df["datetime"] + pd.Timedelta(minutes=5)
     )
@@ -329,7 +340,7 @@ def calculate_indicators(df):
 
 
 # ============================================================
-# GENERAZIONE SEGNALI V10
+# GENERAZIONE SEGNALI
 # ============================================================
 
 def generate_signal(row):
@@ -356,7 +367,6 @@ def generate_signal(row):
     if row["atr"] <= 0 or row["atr_avg50"] <= 0:
         return None
 
-    # BUY
     buy = (
         row["ema20"] > row["ema50"] > row["ema100"]
         and row["ema_gap_atr"] >= EMA_GAP_ATR_MIN
@@ -372,7 +382,6 @@ def generate_signal(row):
     if buy:
         return "BUY"
 
-    # SELL
     sell = (
         row["ema20"] < row["ema50"] < row["ema100"]
         and row["ema_gap_atr"] <= -EMA_GAP_ATR_MIN
@@ -393,14 +402,23 @@ def generate_signal(row):
 
 # ============================================================
 # DIAGNOSTICA FILTRI V10
-# Non modifica la generazione dei segnali.
+# Non modifica le regole della strategia.
 # ============================================================
 
 def diagnose_filters(row):
     required = [
-        "ema20", "ema50", "ema100", "atr", "atr_avg50",
-        "mom6", "rsi", "body_ratio", "close_position",
-        "previous_high", "previous_low", "ema_gap_atr",
+        "ema20",
+        "ema50",
+        "ema100",
+        "atr",
+        "atr_avg50",
+        "mom6",
+        "rsi",
+        "body_ratio",
+        "close_position",
+        "previous_high",
+        "previous_low",
+        "ema_gap_atr",
         "trend15",
     ]
 
@@ -415,10 +433,9 @@ def diagnose_filters(row):
 
     if missing:
         print("DATI MANCANTI:", ", ".join(missing))
-        print("Diagnostica incompleta: alcuni indicatori non disponibili.")
+        print("Diagnostica incompleta: indicatori non disponibili.")
         return
 
-    # Condizioni BUY
     buy_checks = {
         "EMA20 > EMA50 > EMA100":
             row["ema20"] > row["ema50"] > row["ema100"],
@@ -448,7 +465,6 @@ def diagnose_filters(row):
             BUY_RSI_MIN <= row["rsi"] <= BUY_RSI_MAX,
     }
 
-    # Condizioni SELL
     sell_checks = {
         "EMA20 < EMA50 < EMA100":
             row["ema20"] < row["ema50"] < row["ema100"],
@@ -484,13 +500,15 @@ def diagnose_filters(row):
     ]:
         passed = sum(checks.values())
 
-        print(f"\n--- {direction}: {passed}/{len(checks)} filtri superati ---")
+        print(
+            f"\n--- {direction}: "
+            f"{passed}/{len(checks)} filtri superati ---"
+        )
 
         for name, ok in checks.items():
             print(f"[{'OK' if ok else 'NO'}] {name}")
 
     print("=" * 58)
-
 
 
 # ============================================================
@@ -531,11 +549,12 @@ def main():
 
     row = df.iloc[-1]
 
-diagnose_filters(row)
+    # Stampa tutti i filtri prima di decidere se inviare un segnale.
+    diagnose_filters(row)
 
-signal = generate_signal(row)
+    signal = generate_signal(row)
 
-    print(f"Ultima candela UTC: {row['datetime']}")
+    print(f"\nUltima candela UTC: {row['datetime']}")
     print(f"Prezzo di riferimento: {row['close']:.2f}")
     print(f"RSI: {row['rsi']:.2f}")
     print(f"ATR: {row['atr']:.3f}")
@@ -546,17 +565,14 @@ signal = generate_signal(row)
         print("Nessun segnale: condizioni V10 non soddisfatte.")
         return
 
-    # Cooldown direzionale: evita un nuovo segnale BUY o SELL
-    # se la stessa direzione si è verificata nelle 12 candele
-    # precedenti (60 minuti).
+    # Cooldown direzionale: controlla le 12 candele precedenti.
     recent = df.iloc[-(COOLDOWN_BARS + 1):-1]
 
     for _, previous in recent.iterrows():
         if generate_signal(previous) == signal:
             print(
-                f"Segnale {signal} ignorato: "
-                f"stessa direzione rilevata negli ultimi "
-                f"{COOLDOWN_MIN} minuti."
+                f"Segnale {signal} ignorato: stessa direzione "
+                f"rilevata negli ultimi {COOLDOWN_MIN} minuti."
             )
             return
 
@@ -591,13 +607,16 @@ signal = generate_signal(row)
         f"Rapporto teorico rischio/rendimento: "
         f"1:{reward / risk:.2f}\n"
         f"Candela UTC: {row['datetime']}\n\n"
-        f"Segnale sperimentale: non è una garanzia "
-        f"di risultato. Verificare sempre i dati."
+        f"Segnale sperimentale: non è una garanzia di risultato."
     )
 
     send_telegram(message)
     print(f"Segnale {signal} inviato a Telegram.")
 
+
+# ============================================================
+# AVVIO
+# ============================================================
 
 if __name__ == "__main__":
     try:
